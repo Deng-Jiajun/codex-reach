@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Codex Reach</string>
+    <string name="title_activity_main">Codex Reach</string>
+    <string name="package_name">io.github.dengjiajun.codexreach</string>
+    <string name="custom_url_scheme">io.github.dengjiajun.codexreach</string>
+</resources>

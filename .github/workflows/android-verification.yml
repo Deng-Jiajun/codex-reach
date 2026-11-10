@@ -1,0 +1,64 @@
+name: Android verification
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: actions/setup-java@v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Build web assets and synchronize Android
+        run: |
+          npm ci --no-fund
+          npm run android:sync
+      - name: Build APK and instrumentation tests
+        working-directory: android
+        run: |
+          ./gradlew --no-daemon clean :app:assembleDebug :app:assembleDebugAndroidTest
+          ./gradlew --no-daemon :app:dependencyInsight --dependency sqlite --configuration debugRuntimeClasspath
+      - name: Check APK signing and 16 KB packaging
+        run: |
+          mkdir -p artifacts
+          sdkmanager 'build-tools;36.0.0'
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 android/app/build/outputs/apk/debug/app-debug.apk > artifacts/zip-alignment.txt
+          python3 scripts/check-elf-alignment.py android/app/build/outputs/apk/debug/app-debug.apk | tee artifacts/elf-alignment.txt
+          sha256sum android/app/build/outputs/apk/debug/app-debug.apk | tee artifacts/apk-sha256.txt
+      - name: Enable emulator hardware acceleration
+        run: sudo chmod a+rw /dev/kvm
+      - name: Verify SQLite through the Capacitor bridge on Android 16
+        uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
+          script: bash scripts/android-smoke.sh
+      - name: Upload APK and verification results
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: codex-reach-verification-${{ github.run_number }}
+          path: |
+            android/app/build/outputs/apk/debug/app-debug.apk
+            artifacts/
+          if-no-files-found: error
+          retention-days: 14

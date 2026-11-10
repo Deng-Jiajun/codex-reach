@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+package=io.github.dengjiajun.codexreach.verification
+mkdir -p artifacts
+trap 'adb logcat -d > artifacts/logcat.txt || true' EXIT
+adb logcat -c
+{
+  adb shell getprop ro.build.version.release
+  adb shell getprop ro.product.cpu.abi
+  adb shell getconf PAGE_SIZE
+  adb shell dumpsys webviewupdate
+} > artifacts/android-environment.txt
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+
+for stage in write persist; do
+  adb shell am force-stop "$package"
+  adb shell am instrument -w -r \
+    -e class io.github.dengjiajun.codexreach.SQLiteBridgeTest \
+    -e stage "$stage" \
+    "$package.test/androidx.test.runner.AndroidJUnitRunner" \
+    | tee "artifacts/instrumentation-$stage.txt"
+  grep -q 'OK (1 test)' "artifacts/instrumentation-$stage.txt"
+done
+
+adb pull "/sdcard/Android/data/$package/files/verification-write.png" artifacts/
+adb pull "/sdcard/Android/data/$package/files/verification-persist.png" artifacts/
+
+adb logcat -d -s CodexReachVerification:I '*:S' > artifacts/sqlite-results.txt
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+lines = Path("artifacts/sqlite-results.txt").read_text(encoding="utf-8").splitlines()
+results = [json.loads(line[line.index('{'):]) for line in lines if '{' in line]
+assert len(results) == 2, f"Expected two results, got {len(results)}"
+assert results[0]["stage"] == "write" and results[1]["stage"] == "persist"
+assert results[0]["token"] == results[1]["token"], "Stored token changed after process restart"
+print(json.dumps(results, ensure_ascii=False, indent=2))
+Path("artifacts/sqlite-results.json").write_text(
+    json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+)
+PY
