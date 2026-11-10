@@ -35,7 +35,6 @@ jobs:
       - name: Check APK signing and 16 KB packaging
         run: |
           mkdir -p artifacts
-          sdkmanager 'build-tools;36.0.0'
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 android/app/build/outputs/apk/debug/app-debug.apk > artifacts/zip-alignment.txt
           python3 scripts/check-elf-alignment.py android/app/build/outputs/apk/debug/app-debug.apk | tee artifacts/elf-alignment.txt
