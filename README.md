@@ -4,6 +4,8 @@
 
 当前工程处于技术验证阶段，提供可安装的 SQLite 验证页面。聊天界面和 Rust 服务待实现。
 
+2026-11-11 已在 GitHub Actions 的 Android 16 x86_64 模拟器中通过 SQLite 写入、分页、编辑替换、失败回滚和进程重启持久化检查，APK 签名与 16 KB 静态对齐检查也已通过。[验证记录](https://github.com/Deng-Jiajun/codex-reach/actions/runs/42857179646)
+
 ## 验证内容
 
 - 从 WebView 通过 Capacitor 调用 Android SQLite 插件

@@ -50,6 +50,7 @@ public class SQLiteBridgeTest {
                     assertTrue(result.toString(), result.getBoolean("ok"));
                     assertEquals(stage.equals("write") ? 7 : 2, result.getJSONArray("checks").length());
                     assertTrue("Missing persisted token", !result.getString("token").isEmpty());
+                    InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(500, 10_000);
                     File screenshot = new File(
                         InstrumentationRegistry.getInstrumentation().getTargetContext().getExternalFilesDir(null),
                         "verification-" + stage + ".png"
