@@ -28,6 +28,7 @@ jobs:
           cargo +1.96.0 test --manifest-path server/Cargo.toml --locked
           cargo +1.96.0 build --manifest-path server/Cargo.toml --release --locked
           npm ci --no-fund
+          npm test
           npm run build
           New-Item -ItemType Directory -Path artifacts/windows -Force
           Copy-Item server/target/release/codex-reach-server.exe artifacts/windows/
@@ -56,6 +57,7 @@ jobs:
       - name: Build web assets and synchronize Android
         run: |
           npm ci --no-fund
+          npm test
           npm run android:sync
       - name: Build APK and instrumentation tests
         working-directory: android

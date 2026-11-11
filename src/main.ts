@@ -2,9 +2,10 @@ import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
-import { ReachClient } from './api';
+import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
-import type { Connection, HistoryPage, LiveView, Message, Project, Receipt, Thread, Turn } from './types';
+import { mergeHistory, mergeTail } from './sync';
+import type { Connection, HistoryPage, LiveView, Message, Project, Receipt, Thread } from './types';
 import './style.css';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -139,20 +140,11 @@ function renderInbox(): void {
   element('more-threads').hidden = !nextThreads;
 }
 
-function mergeTail(current: Turn[], incoming: Turn[], complete: boolean): Turn[] | null {
-  if (complete || !current.length) return incoming;
-  if (!incoming.length) return current;
-  const boundary = current.findIndex(turn => turn.id === incoming[0].id);
-  if (boundary < 0) return null;
-  return [...current.slice(0, boundary), ...incoming];
-}
-
 async function refreshHistory(id: string, token: number): Promise<void> {
   if (!client) return;
   const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(id)}/history`);
   if (token !== generation || selected?.id !== id) return;
-  page.turns = mergeTail(selected.turns, page.turns, !page.hasMore) ?? page.turns;
-  selected = page;
+  selected = mergeHistory(selected, page);
   renderChat();
   scheduleCache();
 }
@@ -312,17 +304,29 @@ async function checkReceipt(token: number): Promise<void> {
   const request = pending;
   const chatId = selected?.id;
   if (!request || !chatId || !client) return;
-  const receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(request.requestId)}`);
+  let receipt: Receipt;
+  try {
+    receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(request.requestId)}`);
+  } catch (error) {
+    if (!(error instanceof ReachError) || error.status !== 404) throw error;
+    if (token !== generation || pending?.requestId !== request.requestId) return;
+    pending.status = 'unknown';
+    localStorage.setItem(storageKey('pending', chatId), JSON.stringify(pending));
+    renderChat();
+    return;
+  }
   if (token !== generation || pending?.requestId !== request.requestId) return;
   if (receipt.status === 'accepted') {
     if (messageInput.value === request.prompt) {
       messageInput.value = '';
+      messageInput.style.height = 'auto';
       localStorage.removeItem(storageKey('draft', chatId));
     }
     pending = null;
     localStorage.removeItem(storageKey('pending', chatId));
     revision = null;
-    await refreshHistory(chatId, token);
+    try { await refreshHistory(chatId, token); }
+    catch (error) { if (token === generation) inform(`消息已投递，读取回复失败。${errorText(error)}`); }
   } else {
     pending.status = receipt.status;
     localStorage.setItem(storageKey('pending', chatId), JSON.stringify(pending));

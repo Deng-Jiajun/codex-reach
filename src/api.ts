@@ -1,6 +1,10 @@
 import { CapacitorHttp } from '@capacitor/core';
 import type { Connection } from './types';
 
+export class ReachError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
 export class ReachClient {
   constructor(readonly connection: Connection) {}
 
@@ -12,7 +16,7 @@ export class ReachClient {
       disableRedirects: true, webFetchExtra: { redirect: 'error' },
     });
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(response.data?.error ?? `请求失败，HTTP ${response.status}`);
+      throw new ReachError(response.data?.error ?? `请求失败，HTTP ${response.status}`, response.status);
     }
     return response.data as T;
   }
