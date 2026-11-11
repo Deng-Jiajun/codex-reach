@@ -118,7 +118,7 @@ public class InteractionFlowTest {
         String form = requestCard("mcp-form");
         evaluate(webView, "(()=>{const fields=" + form + ".querySelectorAll('.request-field'); fields[1].querySelector('input').value='2'; fields[2].querySelector('select').value='true'; fields[3].querySelector('select').value='1'; for(const option of fields[4].querySelector('select').options) option.selected=true; " + form + ".querySelector('form').requestSubmit(); return null})()");
         assertEquals(4, stats().getJSONArray("responses").length());
-        evaluate(webView, form + ".querySelector('.request-field input').value='协议核对'; " + form + ".querySelector('form').requestSubmit(); " + form + ".querySelector('form').requestSubmit(); null");
+        evaluate(webView, "(()=>{const input=" + form + ".querySelector('.request-field input'); input.value='协议核对'; input.dispatchEvent(new Event('input',{bubbles:true})); " + form + ".querySelector('form').requestSubmit(); " + form + ".querySelector('form').requestSubmit(); return null})()");
         awaitCount("responses", 5);
         JSONObject formResponse = stats().getJSONArray("responses").getJSONObject(4).getJSONObject("response");
         assertEquals("accept", formResponse.getString("action"));
