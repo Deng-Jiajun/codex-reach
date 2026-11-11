@@ -72,7 +72,7 @@ export class ChatCache {
         statement: `INSERT INTO cached_messages
           (server_id, chat_id, turn_id, item_id, position, kind, text, phase, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         values: [...key, turn.id, message.id, itemPosition, message.kind, message.text, message.phase,
-          JSON.stringify({ questions: message.questions, questionReplies: message.questionReplies })],
+          JSON.stringify({ questions: message.questions, questionReplies: message.questionReplies, attachments: message.attachments })],
       }));
     });
     await this.database.executeSet(entries, true);

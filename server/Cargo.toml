@@ -1,11 +1,12 @@
 [package]
 name = "codex-reach-server"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.96"
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22.1"
 axum = "0.8.9"
 json-patch = "5.0.0"
 rusqlite = { version = "0.41.1", features = ["bundled"] }

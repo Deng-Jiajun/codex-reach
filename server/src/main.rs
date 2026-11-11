@@ -1,17 +1,19 @@
 mod app_server;
 mod desktop;
+mod files;
 mod model;
 mod outbox;
 
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Path, Query, Request, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use desktop::{AppTools, Ipc};
 use outbox::{Outbox, Receipt};
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,7 @@ struct AppState {
     ipc: Mutex<Option<Arc<Ipc>>>,
     outbox: Outbox,
     send_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    upload_directory: PathBuf,
 }
 
 impl AppState {
@@ -135,8 +138,8 @@ impl AppState {
             return Ok(Value::Null);
         }
         ensure!(
-            options.skills.is_empty(),
-            "会话尚未载入桌面，所选 Skill 未投递。请先在电脑端打开此对话后再发送"
+            options.skills.is_empty() && options.attachments.is_empty(),
+            "会话尚未载入桌面，所选 Skill 或附件未投递。请先在电脑端打开此对话后再发送"
         );
         let mut arguments = serde_json::to_value(options)?;
         arguments["threadId"] = json!(chat_id);
@@ -289,10 +292,10 @@ async fn create_thread(
             "首条消息和有效的请求标识为必填项".to_owned(),
         ));
     }
-    if !input.options.skills.is_empty() {
+    if !input.options.skills.is_empty() || !input.options.attachments.is_empty() {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            "请先创建对话，再为后续消息选择 Skill".to_owned(),
+            "请先创建对话，再为后续消息选择 Skill 和附件".to_owned(),
         ));
     }
     let mut options = serde_json::to_value(&input.options).map_err(anyhow::Error::from)?;
@@ -481,20 +484,184 @@ struct PageQuery {
     cursor: Option<String>,
 }
 
+async fn pinned_threads(state: &AppState) -> Result<Vec<Value>> {
+    let result = state
+        .tools
+        .call("list_threads", json!({"mode":"recent","limit":1}))
+        .await?;
+    Ok(result["pinnedThreads"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|thread| thread["kind"] == "codex" && thread["hostId"] == "local")
+        .cloned()
+        .collect())
+}
+
+async fn pin_state(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        json!({"pinned":pinned_threads(&state).await?.iter().any(|thread| thread["id"] == id)}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PinRequest {
+    pinned: bool,
+}
+
+async fn pin_thread(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<PinRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let result = state.tools.call("move_thread_to_sidebar_section", json!({
+        "threadId":id,"source":"codex","hostId":"local","sectionId":if input.pinned { Some("pinned") } else { None }
+    })).await?;
+    Ok(Json(json!({"pinned":result["sectionId"] == "pinned"})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForkRequest {
+    request_id: String,
+}
+
+async fn fork_thread(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<ForkRequest>,
+) -> Result<(StatusCode, Json<Receipt>), ApiError> {
+    if Uuid::parse_str(&input.request_id).is_err() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "分支请求需要有效操作标识".to_owned(),
+        ));
+    }
+    let (receipt, fresh) = state
+        .outbox
+        .reserve(&input.request_id, "fork", &id, "", &json!({}))
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    if fresh {
+        tokio::spawn(async move {
+            let result = async {
+                let result = state
+                    .tools
+                    .call(
+                        "fork_thread",
+                        json!({"threadId":id,"environment":{"type":"same-directory"}}),
+                    )
+                    .await?;
+                ensure!(
+                    result["threadId"].as_str().is_some_and(|id| !id.is_empty()),
+                    "尚未取得分支会话标识，请核对会话列表"
+                );
+                Ok(result)
+            }
+            .await;
+            if state.outbox.finish(&input.request_id, result).is_err() {
+                eprintln!("无法保存分支会话的结果，请检查本地操作数据库");
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
+#[derive(Deserialize)]
+struct FileQuery {
+    path: Option<String>,
+}
+
+async fn browse_files(
+    Query(query): Query<FileQuery>,
+) -> Result<Json<files::DirectoryListing>, ApiError> {
+    let result = tokio::task::spawn_blocking(move || files::browse(query.path.as_deref()))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+struct FilePaths {
+    paths: Vec<String>,
+}
+
+async fn resolve_files(Json(input): Json<FilePaths>) -> Result<Json<Value>, ApiError> {
+    let attachments = tokio::task::spawn_blocking(move || files::resolve(&input.paths))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(json!({"attachments":attachments})))
+}
+
+#[derive(Deserialize)]
+struct UploadRequest {
+    name: String,
+    data: String,
+}
+
+async fn upload_file(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<UploadRequest>,
+) -> Result<Json<files::FileAttachment>, ApiError> {
+    let directory = state.upload_directory.clone();
+    let attachment = tokio::task::spawn_blocking(move || -> Result<_> {
+        ensure!(
+            input.data.len() <= 28_000_000,
+            "单个上传文件不能超过 20 MiB"
+        );
+        let bytes = STANDARD.decode(input.data).context("文件编码无效")?;
+        ensure!(
+            bytes.len() <= 20 * 1024 * 1024,
+            "单个上传文件不能超过 20 MiB"
+        );
+        files::upload(&directory, &input.name, &bytes)
+    })
+    .await
+    .map_err(anyhow::Error::from)??;
+    Ok(Json(attachment))
+}
+
+#[derive(Deserialize)]
+struct PreviewRequest {
+    path: String,
+}
+
+async fn preview_file(Json(input): Json<PreviewRequest>) -> Result<Json<Value>, ApiError> {
+    let preview = tokio::task::spawn_blocking(move || files::preview(&input.path))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(Json(
+        json!({"mime":preview.mime,"data":STANDARD.encode(preview.bytes)}),
+    ))
+}
+
 async fn threads(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let mut arguments =
         json!({"mode":"history","source":"codex","hostId":"local","limit":50,"archived":false});
-    if let Some(cursor) = query.cursor {
+    if let Some(cursor) = &query.cursor {
         arguments["cursor"] = json!(cursor);
     }
     let result = state.tools.call("list_threads", arguments).await?;
-    let threads = result["threads"].as_array().into_iter().flatten()
+    let pinned = if query.cursor.is_none() {
+        pinned_threads(&state).await?
+    } else {
+        Vec::new()
+    };
+    let pinned_ids = pinned
+        .iter()
+        .filter_map(|thread| thread["id"].as_str())
+        .collect::<Vec<_>>();
+    let threads = pinned.iter().chain(result["threads"].as_array().into_iter().flatten()
+        .filter(|thread| !pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())))
         .filter(|thread| thread["kind"] == "codex" && thread["hostId"] == "local")
         .map(|thread| json!({"id":thread["id"],"title":model::text(thread, "title"),"projectId":thread["projectId"],
-            "cwd":thread["cwd"],"status":model::status(&thread["status"]),"updatedAt":thread["updatedAt"]})).collect::<Vec<_>>();
+            "cwd":thread["cwd"],"status":model::status(&thread["status"]),"updatedAt":thread["updatedAt"],
+            "pinned":pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())})).collect::<Vec<_>>();
     Ok(Json(
         json!({"threads":threads,"nextCursor":result["nextCursor"]}),
     ))
@@ -541,10 +708,12 @@ async fn send(
     Path(id): Path<String>,
     Json(input): Json<SendRequest>,
 ) -> Result<(StatusCode, Json<Receipt>), ApiError> {
-    if input.prompt.trim().is_empty() || Uuid::parse_str(&input.request_id).is_err() {
+    if (input.prompt.trim().is_empty() && input.options.attachments.is_empty())
+        || Uuid::parse_str(&input.request_id).is_err()
+    {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            "消息正文和有效的发送标识为必填项".to_owned(),
+            "请填写消息或选择附件，并提供有效的发送标识".to_owned(),
         ));
     }
     let (receipt, fresh) = state
@@ -677,6 +846,7 @@ async fn main() -> Result<()> {
         app_server: app_server::AppServerClient::default(),
         outbox: Outbox::open(&directory.join("outbox.db"))?,
         send_locks: Mutex::new(HashMap::new()),
+        upload_directory: directory.join("uploads"),
         config,
     });
     let cors = CorsLayer::new()
@@ -694,11 +864,20 @@ async fn main() -> Result<()> {
         .route("/status", get(status))
         .route("/projects", get(projects))
         .route("/models", get(models))
+        .route("/files", get(browse_files))
+        .route("/files/resolve", post(resolve_files))
+        .route("/files/preview", post(preview_file))
+        .route(
+            "/files/upload",
+            post(upload_file).layer(DefaultBodyLimit::max(28_010_000)),
+        )
         .route("/threads", get(threads).post(create_thread))
         .route("/threads/{id}/history", get(history))
         .route("/threads/{id}/settings", get(thread_settings))
         .route("/threads/{id}/skills", get(skills))
         .route("/threads/{id}/open", post(open_thread))
+        .route("/threads/{id}/pin", get(pin_state).post(pin_thread))
+        .route("/threads/{id}/fork", post(fork_thread))
         .route("/threads/{id}/stop", post(stop_thread))
         .route("/threads/{id}/respond", post(respond))
         .route("/threads/{id}/edit", post(edit))

@@ -1,0 +1,31 @@
+.files-dialog .files-controls { gap: 12px; }
+.files-dialog .files-path-form { gap: 8px; }
+.files-path-actions, .files-navigation { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.files-path-actions > button { flex: 1; min-height: 40px; }
+.files-navigation { justify-content: space-between; }
+.files-navigation .quiet { padding: 5px 8px; font-size: 13px; }
+.files-list { max-height: min(36dvh, 340px); overflow-y: auto; border-top: 1px solid #dce2d7; border-bottom: 1px solid #dce2d7; overscroll-behavior: contain; }
+.files-entry { display: flex; align-items: center; gap: 14px; width: 100%; min-height: 48px; border: 0; border-bottom: 1px solid #e4e8df; padding: 11px 4px; color: inherit; background: transparent; text-align: left; }
+.files-entry:last-child { border-bottom: 0; }
+.files-entry:active { background: #eaf0e9; }
+.files-entry-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+.files-entry-meta { flex-shrink: 0; color: #6d786e; font-size: 11px; }
+.files-empty { padding: 24px 5px; text-align: center; color: #6d786e; font-size: 13px; }
+.files-upload input { font-size: 13px; padding: 8px; }
+.files-status { margin-top: 12px; white-space: pre-wrap; }
+.attachments { display: flex; flex-wrap: wrap; gap: 7px; min-width: 0; max-width: 100%; margin: 8px 0; }
+.attachment-chip { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid #cbd8c8; border-radius: 9px; background: #e8eee5; color: #395542; font-size: 12px; }
+.attachment-name, .attachment-image-button { grid-column: 1; grid-row: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
+.attachment-image-button { border: 0; border-radius: 4px; padding: 3px 0; background: transparent; color: #336e50; text-decoration: underline; font-size: 13px; }
+.attachment-path { grid-column: 1 / -1; color: #657466; font-size: 11px; overflow-wrap: anywhere; user-select: all; }
+.attachment-copy { justify-self: start; border: 0; border-radius: 4px; padding: 3px 0; background: transparent; color: #526558; font-size: 11px; text-decoration: underline; }
+.attachment-remove { grid-column: 2; grid-row: 1; align-self: start; min-width: 28px; min-height: 28px; border: 0; border-radius: 6px; padding: 0 4px; background: transparent; color: #526558; font-size: 20px; line-height: 1; }
+.attachment-feedback { grid-column: 1 / -1; color: #6d786e; font-size: 11px; }
+.attachment-copy-input { position: fixed; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.attachment-preview { width: min(800px, calc(100vw - 28px)); }
+.attachment-preview .dialog-header h2 { min-width: 0; overflow-wrap: anywhere; }
+.attachment-preview-image { display: block; max-width: 100%; max-height: calc(100dvh - 160px); object-fit: contain; margin: 0 auto; }
+.attachment-preview > .quiet { margin-top: 12px; }
+@media (hover: hover) and (pointer: fine) {
+  .files-entry:hover, .attachment-remove:hover { background: #dfe8db; }
+}

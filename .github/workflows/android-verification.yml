@@ -112,7 +112,21 @@ jobs:
           profile: pixel_7
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot
-          script: bash scripts/android-smoke.sh
+          script: >-
+            bash -euo pipefail -c '
+            bash scripts/android-smoke.sh;
+            python3 scripts/chat-fixture.py > artifacts/organization-fixture.txt 2>&1 & organization_fixture_pid=$!;
+            trap "kill $organization_fixture_pid; adb logcat -d > artifacts/organization-logcat.txt || true" EXIT;
+            for stage in organization organization-persist; do
+            adb shell am force-stop io.github.dengjiajun.codexreach.verification;
+            adb shell am instrument -w -r -e class io.github.dengjiajun.codexreach.OrganizationFlowTest
+            -e stage "$stage" io.github.dengjiajun.codexreach.verification.test/androidx.test.runner.AndroidJUnitRunner
+            | tee "artifacts/instrumentation-$stage.txt";
+            grep -q "OK (1 test)" "artifacts/instrumentation-$stage.txt";
+            adb pull "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png" artifacts/;
+            done;
+            curl --fail --silent http://127.0.0.1:4320/control/organization-stats > artifacts/organization-stats.json
+            '
       - name: Upload APK and verification results
         if: always()
         uses: actions/upload-artifact@v7.0.2

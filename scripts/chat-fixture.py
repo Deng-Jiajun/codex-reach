@@ -1,5 +1,7 @@
 """Serve synthetic chat data for the Android HTTP and persistence checks."""
 
+import base64
+import copy
 import json
 import threading
 import time
@@ -134,6 +136,83 @@ def initial_interaction_state():
 interaction_state = initial_interaction_state()
 
 
+organization_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGOQS9nyHwAEEAI26XT+MQAAAABJRU5ErkJggg=="
+organization_files = {
+    "C:/Example": {"path": "C:/Example", "name": "Example", "directory": True, "image": False},
+    "C:/Example/docs": {"path": "C:/Example/docs", "name": "docs", "directory": True, "image": False},
+    "C:/Example/desktop.txt": {"path": "C:/Example/desktop.txt", "name": "desktop.txt", "directory": False, "image": False},
+    "C:/Example/docs/readme.md": {"path": "C:/Example/docs/readme.md", "name": "readme.md", "directory": False, "image": False},
+    "C:/Example/photo.png": {"path": "C:/Example/photo.png", "name": "photo.png", "directory": False, "image": True},
+    "C:/Example/history.png": {"path": "C:/Example/history.png", "name": "history.png", "directory": False, "image": True},
+}
+
+
+def initial_organization_state():
+    return {
+        "receipts": {}, "pinRequests": [], "forkRequests": [], "forkPosts": 0, "forkCreateCount": 0,
+        "fileQueries": [], "resolveRequests": [], "uploadRequests": [], "previewRequests": [],
+        "uploadedFiles": {}, "uploadedData": {}, "messageRequests": [], "sendPosts": 0, "sendCount": 0,
+        "pendingFork": None, "awaitingMessages": [], "pinned": {},
+        "threads": {"fixture-organization": {
+            "id": "fixture-organization", "title": "组织与附件验证", "cwd": "C:/Example", "revision": 1,
+            "turns": [{"id": "organization-history", "status": "completed", "messages": [
+                {"id": "organization-user", "kind": "user", "text": "ORGANIZATION_USER", "phase": None,
+                    "attachments": [organization_files["C:/Example/history.png"]]},
+                {"id": "organization-answer", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n第二行可引用", "phase": "final_answer"},
+            ]}],
+        }},
+    }
+
+
+organization_state = initial_organization_state()
+
+
+def organization_listing(path):
+    paths = {
+        None: (None, ["C:/"]),
+        "C:/": (None, ["C:/Example"]),
+        "C:/Example": ("C:/", ["C:/Example/docs", "C:/Example/desktop.txt", "C:/Example/photo.png"]),
+        "C:/Example/docs": ("C:/Example", ["C:/Example/docs/readme.md"]),
+    }
+    if path not in paths:
+        return None
+    parent, children = paths[path]
+    entries = []
+    for child in children:
+        item = organization_files.get(child, {"name": child, "path": child, "directory": True})
+        entries.append({"name": item["name"], "path": child, "directory": item["directory"],
+            "size": None if item["directory"] else 70 if child.endswith(".png") else 24})
+    return {"path": path, "parent": parent, "entries": entries}
+
+
+def release_organization_fork():
+    request_id = organization_state["pendingFork"]
+    if request_id is None:
+        return
+    child = copy.deepcopy(organization_state["threads"]["fixture-organization"])
+    child["id"] = "fixture-organization-child"
+    child["title"] = "组织分支验证"
+    organization_state["threads"][child["id"]] = child
+    organization_state["forkCreateCount"] += 1
+    organization_state["receipts"][request_id].update({"status": "accepted", "result": {
+        "threadId": child["id"], "synchronization": {"status": "complete"},
+    }})
+    organization_state["pendingFork"] = None
+
+
+def release_organization_messages():
+    for request in organization_state["awaitingMessages"]:
+        chat = organization_state["threads"][request["chatId"]]
+        chat["turns"].append({"id": "organization-send-" + request["requestId"], "status": "completed", "messages": [
+            {"id": "organization-sent-user-" + request["requestId"], "kind": "user", "text": request["prompt"], "phase": None,
+                "attachments": copy.deepcopy(request.get("attachments", []))},
+            {"id": "organization-sent-assistant-" + request["requestId"], "kind": "assistant", "text": "ORGANIZATION_ATTACHMENTS_OK", "phase": "final_answer"},
+        ]})
+        chat["revision"] += 1
+        organization_state["receipts"][request["requestId"]]["status"] = "accepted"
+    organization_state["awaitingMessages"].clear()
+
+
 def same_request_id(left, right):
     return type(left) is type(right) and left == right
 
@@ -221,6 +300,13 @@ class Handler(BaseHTTPRequestHandler):
                     "responses", "messageRequests", "editRequests", "openCount", "postCounts",
                 ]})
             return
+        if url.path == "/control/organization-stats":
+            with condition:
+                self.reply({key: organization_state[key] for key in [
+                    "pinRequests", "forkRequests", "forkPosts", "forkCreateCount", "fileQueries", "resolveRequests",
+                    "uploadRequests", "previewRequests", "messageRequests", "sendPosts", "sendCount",
+                ]})
+            return
         if not self.authorized():
             return
         if url.path == '/api/threads':
@@ -232,6 +318,16 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"projects": [{"id": "fixture-project", "name": "验证项目", "path": "C:\\Example"}]}
             elif url.path == "/api/models":
                 result = {"models": models}
+            elif url.path == "/api/files":
+                path = parse_qs(url.query).get("path", [None])[0]
+                organization_state["fileQueries"].append(path)
+                result = organization_listing(path)
+                if result is None:
+                    self.reply({"error": "合成目录不存在"}, 404)
+                    return
+            elif url.path.startswith("/api/threads/fixture-organization") and url.path.endswith("/pin"):
+                chat_id = url.path.split("/")[3]
+                result = {"pinned": organization_state["pinned"].get(chat_id, False)}
             elif url.path.endswith("/settings"):
                 task = task_state["task"] if url.path == "/api/threads/fixture-task/settings" else None
                 result = {"model": task["model"] if task else "fixture-standard", "thinking": task["thinking"] if task else "low"}
@@ -244,6 +340,25 @@ class Handler(BaseHTTPRequestHandler):
                 ], "nextCursor": None}
                 if task_state["task"]:
                     result["threads"].append({"id": "fixture-task", "title": "任务创建验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": task_state["task"]["status"], "updatedAt": 1794326400})
+                for chat in organization_state["threads"].values():
+                    result["threads"].append({"id": chat["id"], "title": chat["title"], "projectId": "fixture-project",
+                        "cwd": chat["cwd"], "status": "idle", "updatedAt": 1794326400,
+                        "pinned": organization_state["pinned"].get(chat["id"], False)})
+            elif url.path.startswith("/api/threads/fixture-organization") and url.path.endswith(("/history", "/live")):
+                chat_id = url.path.split("/")[3]
+                chat = organization_state["threads"].get(chat_id)
+                if chat is None:
+                    self.reply({"error": "合成分支尚未创建"}, 404)
+                    return
+                if url.path.endswith("/live"):
+                    if parse_qs(url.query).get("after", [None])[0] == str(chat["revision"]):
+                        condition.wait(timeout=0.4)
+                    result = {"available": True, "revision": str(chat["revision"]), "turns": chat["turns"],
+                        "complete": True, "status": "idle", "activeTurnId": None, "requests": [], "waiting": False,
+                        "editableTurn": None, "model": "fixture-standard"}
+                else:
+                    result = {"id": chat_id, "title": chat["title"], "cwd": chat["cwd"], "status": "idle",
+                        "turns": chat["turns"], "nextCursor": None, "hasMore": False}
             elif url.path in ("/api/threads/fixture-interactions/history", "/api/threads/fixture-interactions/live"):
                 if url.path.endswith("/live"):
                     if parse_qs(url.query).get("after", [None])[0] == str(interaction_state["revision"]):
@@ -314,7 +429,7 @@ class Handler(BaseHTTPRequestHandler):
                     "activeTurnId": state["turns"][-1]["id"] if state["status"] == "active" else None, "model": "fixture-standard", "waiting": False}
             elif url.path.startswith("/api/requests/"):
                 request_id = url.path.rsplit("/", 1)[1]
-                result = state["requests"].get(request_id) or task_state["requests"].get(request_id) or interaction_state["receipts"].get(request_id)
+                result = state["requests"].get(request_id) or task_state["requests"].get(request_id) or interaction_state["receipts"].get(request_id) or organization_state["receipts"].get(request_id)
                 if result is None:
                     self.reply({"error": "未找到发送记录"}, 404)
                     return
@@ -324,6 +439,19 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
+        if self.path in ("/control/organization-reset", "/control/release-organization-fork", "/control/release-organization-message"):
+            with condition:
+                if self.path == "/control/organization-reset":
+                    organization_state.clear()
+                    organization_state.update(initial_organization_state())
+                    state["online"] = True
+                elif self.path == "/control/release-organization-fork":
+                    release_organization_fork()
+                else:
+                    release_organization_messages()
+                condition.notify_all()
+                self.reply({"ok": True})
+            return
         if self.path in ("/control/interactions-reset", "/control/interaction-pulse", "/control/resolve-response",
                 "/control/interaction-questions", "/control/message-unknown", "/control/release-message", "/control/release-edit"):
             with condition:
@@ -404,6 +532,67 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({"ok": True})
             return
         if not self.authorized():
+            return
+        if self.path.startswith("/api/files/"):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            with condition:
+                if self.path == "/api/files/resolve":
+                    organization_state["resolveRequests"].append(request)
+                    files = {**organization_files, **organization_state["uploadedFiles"]}
+                    if any(path not in files for path in request["paths"]):
+                        self.reply({"error": "合成附件不存在"}, 404)
+                        return
+                    self.reply({"attachments": [files[path] for path in request["paths"]]})
+                elif self.path == "/api/files/upload":
+                    data = base64.b64decode(request["data"], validate=True)
+                    if len(data) > 20 * 1024 * 1024:
+                        self.reply({"error": "上传文件不能超过 20 MiB"}, 422)
+                        return
+                    path = "C:/Example/uploads/" + str(len(organization_state["uploadRequests"]) + 1) + "/" + request["name"]
+                    attachment = {"path": path, "name": request["name"], "directory": False,
+                        "image": request["name"].lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))}
+                    organization_state["uploadedFiles"][path] = attachment
+                    organization_state["uploadedData"][path] = request["data"]
+                    organization_state["uploadRequests"].append({"name": request["name"], "size": len(data), "path": path})
+                    self.reply(attachment)
+                elif self.path == "/api/files/preview":
+                    path = request["path"]
+                    organization_state["previewRequests"].append(request)
+                    data = organization_state["uploadedData"].get(path)
+                    if data is None and path in ("C:/Example/photo.png", "C:/Example/history.png"):
+                        data = organization_png
+                    if data is None:
+                        self.reply({"error": "合成图片不存在"}, 404)
+                        return
+                    self.reply({"mime": "image/png", "data": data})
+                else:
+                    self.reply({"error": "Unknown fixture endpoint"}, 404)
+            return
+        if self.path.startswith("/api/threads/fixture-organization") and self.path.endswith(("/pin", "/fork", "/messages")):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            chat_id = self.path.split("/")[3]
+            operation = self.path.rsplit("/", 1)[1]
+            with condition:
+                if operation == "pin":
+                    organization_state["pinRequests"].append({"chatId": chat_id, **request})
+                    organization_state["pinned"][chat_id] = request["pinned"]
+                    self.reply({"pinned": request["pinned"]})
+                    return
+                request_id = request["requestId"]
+                organization_state["forkPosts" if operation == "fork" else "sendPosts"] += 1
+                receipt = organization_state["receipts"].get(request_id)
+                if receipt is None:
+                    if operation == "fork":
+                        organization_state["forkRequests"].append({"chatId": chat_id, **request})
+                        organization_state["pendingFork"] = request_id
+                    else:
+                        message = {"chatId": chat_id, **request}
+                        organization_state["messageRequests"].append(message)
+                        organization_state["awaitingMessages"].append(message)
+                        organization_state["sendCount"] += 1
+                    receipt = {"requestId": request_id, "chatId": chat_id, "status": "sending", "error": None, "result": None}
+                    organization_state["receipts"][request_id] = receipt
+                self.reply(receipt, 202)
             return
         if self.path == "/api/threads/fixture-interactions/open":
             self.rfile.read(int(self.headers.get("Content-Length", "0")))

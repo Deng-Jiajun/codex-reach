@@ -7,6 +7,8 @@ import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
 import { populateParameters, selectedParameters, updateThinking } from './task-options';
 import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
+import { openFilePicker, renderAttachments, type FileAttachment } from './files';
+import { openChatActions, openQuote } from './chat-actions';
 import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, Skill, Thread, TurnOptions } from './types';
 import './style.css';
 
@@ -59,6 +61,7 @@ let optionsChatId = '';
 let skillsChatId = '';
 let skillChoices: Skill[] = [];
 let selectedSkills: Skill[] = [];
+let selectedFiles: FileAttachment[] = [];
 let skillDraft = new Set<string>();
 let liveRequests: PendingRequest[] = [];
 let editableTurn: EditableTurn | null = null;
@@ -297,7 +300,8 @@ function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
   const visible = threads.filter(thread => (!query || (thread.title || '').toLocaleLowerCase().includes(query))
-    && (!projectId || (projectId === '__none__' ? !thread.projectId : thread.projectId === projectId)));
+    && (!projectId || (projectId === '__none__' ? !thread.projectId : thread.projectId === projectId)))
+    .sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
   const fragment = document.createDocumentFragment();
   for (const thread of visible) {
     const button = document.createElement('button');
@@ -311,7 +315,7 @@ function renderInbox(): void {
     metadata.className = 'thread-meta';
     const project = projects.find(item => item.id === thread.projectId);
     const date = new Date(thread.updatedAt * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-    metadata.textContent = [project?.name ?? '无项目', date, stateLabel(thread.status)].filter(Boolean).join(' · ');
+    metadata.textContent = [thread.pinned ? '置顶' : '', project?.name ?? '无项目', date, stateLabel(thread.status)].filter(Boolean).join(' · ');
     button.append(title, metadata);
     button.addEventListener('click', () => void openChat(thread.id));
     fragment.append(button);
@@ -394,6 +398,7 @@ async function openChat(id: string): Promise<void> {
   stopOperation = readStored(storageKey('stop', id));
   interaction = readStored(storageKey('interaction', id));
   selectedSkills = readStored<Skill[]>(storageKey('skills', id)) ?? [];
+  selectedFiles = readStored<FileAttachment[]>(storageKey('attachments', id)) ?? [];
   questionReplies = readStored<QuestionReply[]>(storageKey('question-replies', id)) ?? [];
   questionDrafts = readStored<QuestionReply[]>(storageKey('question-drafts', id)) ?? pending?.questionReplies ?? [];
   turnOptions = readStored<TurnOptions>(storageKey('options', id)) ?? {};
@@ -515,6 +520,30 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
       details.append(summary, content);
       node.append(details);
     } else node.append(content);
+    const attachments = document.createElement('div');
+    attachments.className = 'message-attachments';
+    node.append(attachments);
+    if (message.kind === 'user' || message.kind === 'assistant') {
+      const quote = document.createElement('button');
+      quote.type = 'button';
+      quote.className = 'quiet quote-message';
+      quote.textContent = '引用';
+      let selectedText = '';
+      quote.addEventListener('pointerdown', () => {
+        const selection = window.getSelection();
+        selectedText = selection && content.contains(selection.anchorNode) && content.contains(selection.focusNode) ? selection.toString() : '';
+      });
+      quote.addEventListener('click', () => {
+        if (!selected) return;
+        openQuote(selectedText || node!.dataset.body || '', selected, message.id, quoteText => {
+          messageInput.value = `${messageInput.value}${messageInput.value ? '\n\n' : ''}${quoteText}`;
+          messageInput.dispatchEvent(new Event('input'));
+          messageInput.focus();
+        });
+        selectedText = '';
+      });
+      node.append(quote);
+    }
     if (message.kind === 'user') {
       const edit = document.createElement('button');
       edit.type = 'button';
@@ -536,6 +565,9 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     node.dataset.body = body;
   }
   const edit = node.querySelector<HTMLButtonElement>('.edit-message');
+  const quote = node.querySelector<HTMLButtonElement>('.quote-message');
+  if (quote) quote.hidden = !body;
+  renderAttachments(node.querySelector<HTMLElement>('.message-attachments')!, message.attachments ?? [], { client });
   if (edit) {
     edit.hidden = !editableTurn || key !== `${editableTurn.turnId}:${editableTurn.messageId}`;
     edit.disabled = !connected || runtimeStatus === 'active' || Boolean(pending) || Boolean(interaction) || Boolean(stopOperation);
@@ -620,7 +652,8 @@ function renderChat(forceBottom = false): void {
   const activity = element('activity');
   activity.textContent = runtimeStatus === null && liveRequests.length ? '等待电脑端重新同步请求…' : liveWaiting ? '等待处理请求' : '正在处理…';
   activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active' && !liveRequests.length);
-  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction) || !messageInput.value.trim();
+  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
+    || (!messageInput.value.trim() && !selectedFiles.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
   sendButton.textContent = runtimeStatus === 'active' ? '追加' : '发送';
   stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
   stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
@@ -631,11 +664,20 @@ function renderChat(forceBottom = false): void {
   element('parameters-button').textContent = turnOptions.model ? `${turnOptions.model} · ${turnOptions.thinking}` : '沿用会话参数';
   element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
   element<HTMLButtonElement>('skills-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
+  element<HTMLButtonElement>('files-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
+  element<HTMLButtonElement>('chat-actions-button').disabled = !connected;
+  element('open-attachment-chat').hidden = !selectedFiles.length || runtimeStatus !== null;
+  element<HTMLButtonElement>('open-attachment-chat').disabled = !connected || opening;
+  renderAttachments(element('selected-files'), selectedFiles, { client, onRemove: pending ? undefined : index => {
+    selectedFiles.splice(index, 1);
+    localStorage.setItem(storageKey('attachments', selected!.id), JSON.stringify(selectedFiles));
+    renderChat();
+  } });
   renderSelectedSkills();
   element('interaction-note').hidden = !interaction || interaction.kind !== 'edit';
   element('interaction-status').textContent = interaction?.error ?? '正在确认编辑结果…';
   element('resolve-interaction').hidden = interaction?.status !== 'unknown';
-  element<HTMLButtonElement>('submit-edit').disabled = Boolean(interaction) || !connected || runtimeStatus === 'active';
+  element<HTMLButtonElement>('submit-edit').disabled = Boolean(interaction) || !connected || runtimeStatus === 'active' || Boolean(editing?.blockedReason);
   element('delivery-note').hidden = !pending;
   element('delivery-text').textContent = pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
   element('resolve-delivery').hidden = pending?.status !== 'unknown';
@@ -688,6 +730,11 @@ async function checkReceipt(token: number): Promise<void> {
       selectedSkills = selectedSkills.filter(skill => !sent.has(skill.path));
       localStorage.setItem(storageKey('skills', chatId), JSON.stringify(selectedSkills));
     }
+    if (request.options?.attachments?.length) {
+      const sent = new Set(request.options.attachments.map(file => file.path));
+      selectedFiles = selectedFiles.filter(file => !sent.has(file.path));
+      localStorage.setItem(storageKey('attachments', chatId), JSON.stringify(selectedFiles));
+    }
     if (request.questionReplies?.length) {
       const answered = new Map(questionReplies.map(reply => [reply.questionItemId, reply]));
       for (const reply of request.questionReplies) answered.set(reply.questionItemId, reply);
@@ -710,7 +757,8 @@ async function checkReceipt(token: number): Promise<void> {
 }
 
 async function sendMessage(): Promise<void> {
-  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })) });
+  if (selectedFiles.length && runtimeStatus === null) return;
+  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles });
 }
 
 async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
@@ -724,7 +772,7 @@ async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
 }
 
 async function sendPrompt(prompt: string, options: TurnOptions, replies?: QuestionReply[]): Promise<void> {
-  if (!selected || !client || !connected || pending || stopOperation || interaction || !prompt.trim()) return;
+  if (!selected || !client || !connected || pending || stopOperation || interaction || (!prompt.trim() && !options.attachments?.length)) return;
   const id = selected.id;
   const token = generation;
   const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies };
@@ -1073,7 +1121,8 @@ function openEdit(): void {
   if (!selected || !editableTurn || runtimeStatus === 'active' || interaction || pending) return;
   editing = { ...editableTurn, chatId: selected.id };
   element<HTMLTextAreaElement>('edit-prompt').value = localStorage.getItem(storageKey('edit-draft', `${selected.id}:${editableTurn.turnId}`)) ?? editableTurn.prompt;
-  showFormError('edit-error');
+  showFormError('edit-error', editing.blockedReason);
+  element<HTMLButtonElement>('submit-edit').disabled = Boolean(editing.blockedReason);
   editDialog.showModal();
 }
 
@@ -1138,7 +1187,7 @@ async function submitResponse(request: PendingRequest, response: unknown): Promi
 
 async function submitEdit(): Promise<void> {
   const prompt = element<HTMLTextAreaElement>('edit-prompt').value;
-  if (!editing || !selected || selected.id !== editing.chatId || !prompt.trim() || interaction) return;
+  if (!editing || !selected || selected.id !== editing.chatId || !prompt.trim() || interaction || editing.blockedReason) return;
   if (editableTurn?.turnId !== editing.turnId || runtimeStatus === 'active') {
     showFormError('edit-error', '当前轮次已变化，请关闭后重新选择可编辑的消息。');
     return;
@@ -1171,6 +1220,44 @@ element('resolve-create').addEventListener('click', () => {
 });
 element('parameters-button').addEventListener('click', () => void openParameters());
 element('skills-button').addEventListener('click', () => void openSkills());
+element('chat-actions-button').addEventListener('click', () => {
+  if (!client || !selected) return;
+  const id = selected.id;
+  const actionClient = client;
+  openChatActions(actionClient, selected, storageKey('fork', id), {
+    onOpen: threadId => { if (client === actionClient) void openChat(threadId); },
+    onPinned: pinned => {
+      if (client !== actionClient) return;
+      const thread = threads.find(item => item.id === id);
+      if (thread) thread.pinned = pinned;
+      renderInbox();
+    },
+  });
+});
+element('files-button').addEventListener('click', () => {
+  if (!client || !selected || pending) return;
+  const id = selected.id;
+  const fileClient = client;
+  openFilePicker(fileClient, selected.cwd, files => {
+    if (client !== fileClient || selected?.id !== id || pending) return;
+    const paths = new Set(selectedFiles.map(file => file.path));
+    selectedFiles.push(...files.filter(file => !paths.has(file.path)));
+    localStorage.setItem(storageKey('attachments', id), JSON.stringify(selectedFiles));
+    renderChat();
+  });
+});
+element('open-attachment-chat').addEventListener('click', async () => {
+  if (!client || !selected) return;
+  const id = selected.id;
+  const token = generation;
+  const button = element<HTMLButtonElement>('open-attachment-chat');
+  button.disabled = true;
+  try {
+    await client.request(`/threads/${encodeURIComponent(id)}/open`, 'POST', {});
+    if (token === generation) resumeChat();
+  } catch (error) { if (token === generation) inform(errorText(error)); }
+  finally { if (selected?.id === id) button.disabled = false; }
+});
 element('open-skill-chat').addEventListener('click', async () => {
   if (!selected || !client || selected.id !== skillsChatId) return;
   const id = selected.id;
@@ -1275,7 +1362,8 @@ messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
   messageInput.style.height = 'auto';
   messageInput.style.height = `${Math.min(160, messageInput.scrollHeight)}px`;
-  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction) || !messageInput.value.trim();
+  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
+    || (!messageInput.value.trim() && !selectedFiles.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));
@@ -1286,7 +1374,7 @@ element('resolve-delivery').addEventListener('click', () => {
 
 if (Capacitor.getPlatform() === 'android') {
   void App.addListener('backButton', () => {
-    const dialog = document.querySelector<HTMLDialogElement>('dialog[open]');
+    const dialog = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].at(-1);
     if (dialog) dialog.close();
     else if (currentView === 'chat') backToInbox();
     else if (currentView === 'connection' && settingsReturnView) closeSettings();
