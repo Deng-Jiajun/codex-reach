@@ -9,6 +9,36 @@ permissions:
   contents: read
 
 jobs:
+  windows-service:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Prepare Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt
+      - name: Check and build Windows service
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          cargo +1.96.0 fmt --manifest-path server/Cargo.toml --check
+          cargo +1.96.0 test --manifest-path server/Cargo.toml --locked
+          cargo +1.96.0 build --manifest-path server/Cargo.toml --release --locked
+          npm ci --no-fund
+          npm run build
+          New-Item -ItemType Directory -Path artifacts/windows -Force
+          Copy-Item server/target/release/codex-reach-server.exe artifacts/windows/
+          Copy-Item dist artifacts/windows/web -Recurse
+          Copy-Item README.md artifacts/windows/
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: codex-reach-windows-${{ github.run_number }}
+          path: artifacts/windows/
+          if-no-files-found: error
+          retention-days: 14
   verify:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

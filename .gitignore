@@ -10,3 +10,4 @@ dist/
 *.db-wal
 *.log
 artifacts/
+server/target/

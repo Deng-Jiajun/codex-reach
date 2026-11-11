@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Reach 连接配置</title>
+    <style>
+      body {
+        font-family: Inter, "Segoe UI", sans-serif;
+        max-width: 600px;
+        margin: 50px auto;
+        padding: 24px;
+        background: #f6f7f5;
+        color: #242a25;
+        line-height: 1.7;
+      }
+      h1 { font-size: 28px; }
+      label { display: block; margin: 22px 0 8px; font-weight: 600; }
+      input { box-sizing: border-box; width: 100%; padding: 14px; font: inherit; border: 1px solid #ccd5ca; border-radius: 10px; }
+      button { margin-top: 14px; padding: 11px 22px; font: inherit; border: 0; border-radius: 10px; background: #294f3d; color: white; cursor: pointer; }
+      #status { font-size: 14px; color: #526958; }
+    </style>
+  </head>
+  <body>
+    <h1>连接 Codex Reach</h1>
+    <p>手机连接 Tailscale 后，在应用中填写以下信息。</p>
+    <label for="address">服务地址</label>
+    <input id="address" readonly value="http://{{address}}">
+    <label for="key">访问密钥</label>
+    <input id="key" type="password" readonly value="{{apiKey}}">
+    <button id="copy" type="button">复制密钥</button>
+    <p id="status" role="status"></p>
+    <script>
+      document.getElementById('copy').addEventListener('click', async () => {
+        const key = document.getElementById('key');
+        const status = document.getElementById('status');
+        try {
+          await navigator.clipboard.writeText(key.value);
+          status.textContent = '密钥已复制';
+        } catch {
+          key.type = 'text';
+          key.select();
+          status.textContent = '自动复制失败，请手动复制所选密钥';
+        }
+      });
+    </script>
+  </body>
+</html>

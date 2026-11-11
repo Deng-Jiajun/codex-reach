@@ -30,7 +30,16 @@ public class SQLiteBridgeTest {
 
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             AtomicReference<WebView> webView = new AtomicReference<>();
-            scenario.onActivity(activity -> webView.set(activity.getBridge().getWebView()));
+            scenario.onActivity(activity -> {
+                webView.set(activity.getBridge().getWebView());
+            });
+
+            long mainDeadline = SystemClock.elapsedRealtime() + 30_000;
+            while (!evaluate(webView.get(), "document.querySelector('#connect-button')?.disabled === false").equals("true")) {
+                assertTrue("Main page did not become ready", SystemClock.elapsedRealtime() < mainDeadline);
+                SystemClock.sleep(200);
+            }
+            evaluate(webView.get(), "location.href='/verification.html'; null");
 
             long readyDeadline = SystemClock.elapsedRealtime() + 30_000;
             while (!evaluate(webView.get(), "Boolean(window.codexReachVerification)").equals("true")) {

@@ -1,0 +1,8 @@
+export type Message = { id: string; kind: 'user' | 'assistant' | 'reasoning' | 'tool'; text: string; phase: string | null };
+export type Turn = { id: string; status: string; messages: Message[] };
+export type Project = { id: string; name: string; path: string };
+export type Thread = { id: string; title: string; projectId: string | null; cwd: string; status: string; updatedAt: number };
+export type HistoryPage = { id: string; title: string; cwd: string; status: string; turns: Turn[]; nextCursor: string | null; hasMore: boolean };
+export type LiveView = { available: boolean; revision?: string; turns?: Turn[]; complete?: boolean; status?: string; model?: string; waiting?: boolean };
+export type Receipt = { requestId: string; chatId: string; status: 'sending' | 'accepted' | 'unknown'; error: string | null };
+export type Connection = { url: string; key: string; serverId: string };

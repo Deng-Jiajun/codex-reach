@@ -1,5 +1,6 @@
 {
   "appId": "io.github.dengjiajun.codexreach",
   "appName": "Codex Reach",
-  "webDir": "dist"
+  "webDir": "dist",
+  "loggingBehavior": "none"
 }

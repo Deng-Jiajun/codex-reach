@@ -7,25 +7,65 @@
     <title>Codex Reach</title>
   </head>
   <body>
-    <main>
-      <header>
-        <p class="eyebrow">Android 技术验证</p>
-        <h1>Codex Reach</h1>
-        <p id="platform"></p>
+    <div id="app">
+      <header class="app-header">
+        <span class="brand">Codex Reach</span>
+        <button id="settings-button" class="quiet" type="button">连接设置</button>
       </header>
-      <section aria-labelledby="verification-heading">
-        <h2 id="verification-heading">SQLite 检查</h2>
-        <p>使用合成聊天数据，检查原生数据库和应用重启后的数据保留。</p>
-        <div class="actions">
-          <button id="run" type="button">运行全部检查</button>
-          <button id="persist" class="secondary" type="button">检查已保存数据</button>
+      <p id="notice" role="status" aria-live="polite" hidden></p>
+      <main id="connection-view" class="connection-view">
+        <section class="connection-card">
+          <h1>连接电脑</h1>
+          <p>打开电脑上的 Codex Reach 服务，手机连接同一 Tailscale 网络。</p>
+          <form id="connection-form">
+            <label for="server-url">服务地址</label>
+            <input id="server-url" type="url" placeholder="http://100.x.x.x:4317" required autocapitalize="none" spellcheck="false" />
+            <label for="server-key">访问密钥</label>
+            <input id="server-key" type="password" required autocomplete="current-password" />
+            <button id="connect-button" class="primary" type="submit" disabled>连接</button>
+          </form>
+          <p class="connection-help">在电脑上打开服务的 /setup 页面，可查看连接信息。</p>
+          <a class="diagnostic-link" href="/verification.html">SQLite 检查</a>
+        </section>
+      </main>
+      <main id="inbox-view" class="inbox-view" hidden>
+        <div class="inbox-heading">
+          <h1>对话</h1>
+          <button id="refresh-button" class="quiet" type="button">刷新</button>
         </div>
-        <p id="status" role="status" aria-live="polite">准备就绪</p>
-        <ol id="results"></ol>
-        <p id="summary"></p>
-      </section>
-      <footer>首次运行全部检查后，关闭并重新打开应用，再检查已保存数据。</footer>
-    </main>
+        <div class="filters">
+          <label class="sr-only" for="project-filter">项目</label>
+          <select id="project-filter"><option value="">全部项目</option></select>
+          <label class="sr-only" for="thread-search">搜索已加载的对话</label>
+          <input id="thread-search" type="search" placeholder="搜索对话" />
+        </div>
+        <div id="thread-list" class="thread-list"></div>
+        <button id="more-threads" class="quiet more" type="button" hidden>加载更多对话</button>
+      </main>
+      <main id="chat-view" class="chat-view" hidden>
+        <header class="chat-header">
+          <button id="back-button" class="quiet back" type="button" aria-label="返回对话列表">‹</button>
+          <div class="chat-heading"><h1 id="chat-title"></h1><p id="chat-meta"></p></div>
+          <span id="chat-state" class="state"></span>
+        </header>
+        <div id="messages-scroll" class="messages-scroll">
+          <button id="older-button" class="quiet more" type="button" hidden>读取更早的消息</button>
+          <div id="messages"></div>
+          <p id="activity" class="activity" role="status" hidden></p>
+        </div>
+        <div class="composer-area">
+          <div id="delivery-note" class="delivery-note" hidden>
+            <p id="delivery-text"></p>
+            <button id="resolve-delivery" class="quiet" type="button" hidden>已核对，恢复编辑</button>
+          </div>
+          <form id="message-form" class="composer">
+            <label class="sr-only" for="message-input">消息</label>
+            <textarea id="message-input" rows="2" placeholder="发送消息" spellcheck="false"></textarea>
+            <button id="send-button" class="send" type="submit">发送</button>
+          </form>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

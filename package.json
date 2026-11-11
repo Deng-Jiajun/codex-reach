@@ -1,6 +1,6 @@
 {
   "name": "codex-reach",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,9 +9,12 @@
     "android:sync": "npm run build && cap sync android"
   },
   "dependencies": {
+    "@capacitor-community/sqlite": "8.1.1",
     "@capacitor/android": "8.6.0",
+    "@capacitor/app": "8.1.2",
     "@capacitor/core": "8.6.0",
-    "@capacitor-community/sqlite": "8.1.1"
+    "dompurify": "3.4.17",
+    "marked": "18.2.0"
   },
   "devDependencies": {
     "@capacitor/cli": "8.6.0",

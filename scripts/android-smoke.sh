@@ -27,6 +27,25 @@ done
 adb pull "/sdcard/Android/data/$package/files/verification-write.png" artifacts/
 adb pull "/sdcard/Android/data/$package/files/verification-persist.png" artifacts/
 
+python3 scripts/chat-fixture.py > artifacts/chat-fixture.txt 2>&1 &
+fixture_pid=$!
+trap 'kill "$fixture_pid"; adb logcat -d > artifacts/logcat.txt || true' EXIT
+for stage in chat chat-persist; do
+  if [[ "$stage" == chat-persist ]]; then
+    curl --fail --silent --request POST http://127.0.0.1:4320/control/offline
+  fi
+  adb shell am force-stop "$package"
+  adb shell am instrument -w -r \
+    -e class io.github.dengjiajun.codexreach.ChatFlowTest \
+    -e stage "$stage" \
+    "$package.test/androidx.test.runner.AndroidJUnitRunner" \
+    | tee "artifacts/instrumentation-$stage.txt"
+  grep -q 'OK (1 test)' "artifacts/instrumentation-$stage.txt"
+  adb pull "/sdcard/Android/data/$package/files/verification-$stage.png" artifacts/
+done
+curl --fail --silent http://127.0.0.1:4320/control/stats > artifacts/chat-stats.json
+python3 -c 'import json; from pathlib import Path; assert json.loads(Path("artifacts/chat-stats.json").read_text(encoding="utf-8"))["sends"] == 1'
+
 adb logcat -d -s CodexReachVerification:I '*:S' > artifacts/sqlite-results.txt
 python3 - <<'PY'
 import json
