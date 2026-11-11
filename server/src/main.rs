@@ -156,7 +156,7 @@ async fn threads(
     let result = state.tools.call("list_threads", arguments).await?;
     let threads = result["threads"].as_array().into_iter().flatten()
         .filter(|thread| thread["kind"] == "codex" && thread["hostId"] == "local")
-        .map(|thread| json!({"id":thread["id"],"title":thread["title"],"projectId":thread["projectId"],
+        .map(|thread| json!({"id":thread["id"],"title":model::text(thread, "title"),"projectId":thread["projectId"],
             "cwd":thread["cwd"],"status":model::status(&thread["status"]),"updatedAt":thread["updatedAt"]})).collect::<Vec<_>>();
     Ok(Json(
         json!({"threads":threads,"nextCursor":result["nextCursor"]}),
@@ -181,7 +181,7 @@ async fn history(
         .map(model::turn)
         .collect::<Vec<_>>();
     Ok(Json(
-        json!({"id":id,"title":result["thread"]["title"],"cwd":result["thread"]["cwd"],
+        json!({"id":id,"title":model::text(&result["thread"], "title"),"cwd":result["thread"]["cwd"],
         "status":model::status(&result["thread"]["status"]),"turns":turns,
         "nextCursor":result["page"]["nextCursor"],"hasMore":result["page"]["hasMore"]}),
     ))

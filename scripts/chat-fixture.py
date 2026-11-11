@@ -47,6 +47,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self.authorized():
             return
+        if url.path == '/api/threads':
+            time.sleep(0.6)
         with condition:
             if url.path == "/api/status":
                 result = {"serverId": "android-fixture", "version": "0.2.0", "desktopConnected": True}
@@ -55,7 +57,7 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path == "/api/threads":
                 result = {"threads": [{"id": "fixture-chat", "title": "连接与缓存验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": state["status"], "updatedAt": 1794326400}], "nextCursor": None}
             elif url.path == "/api/threads/fixture-chat/history":
-                result = {"id": "fixture-chat", "title": "连接与缓存验证", "cwd": "C:\\Example", "status": state["status"], "turns": state["turns"], "nextCursor": None, "hasMore": False}
+                result = {"id": "fixture-chat", "title": None, "cwd": "C:\\Example", "status": state["status"], "turns": state["turns"], "nextCursor": None, "hasMore": False}
             elif url.path == "/api/threads/fixture-chat/live":
                 after = parse_qs(url.query).get("after", [None])[0]
                 if after == str(state["revision"]):
@@ -72,9 +74,15 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
-        if self.path == "/control/offline":
+        if self.path in ("/control/offline", "/control/online"):
             with condition:
-                state["online"] = False
+                state["online"] = self.path == "/control/online"
+                if state["online"]:
+                    state["turns"][-1]["messages"].append({
+                        "id": f"reconnected-{state['revision']}", "kind": "assistant",
+                        "text": "REACH_RECONNECTED", "phase": "final_answer",
+                    })
+                    state["revision"] += 1
                 condition.notify_all()
             self.reply({"ok": True})
             return

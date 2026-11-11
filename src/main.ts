@@ -14,6 +14,7 @@ const notice = element<HTMLParagraphElement>('notice');
 const urlInput = element<HTMLInputElement>('server-url');
 const keyInput = element<HTMLInputElement>('server-key');
 const connectButton = element<HTMLButtonElement>('connect-button');
+const refreshButton = element<HTMLButtonElement>('refresh-button');
 const projectFilter = element<HTMLSelectElement>('project-filter');
 const searchInput = element<HTMLInputElement>('thread-search');
 const messageInput = element<HTMLTextAreaElement>('message-input');
@@ -23,6 +24,11 @@ const scroll = element<HTMLDivElement>('messages-scroll');
 const cache = new ChatCache();
 const renderedMessages = new Map<string, HTMLElement>();
 let currentView: typeof views[number] = 'connection';
+let settingsReturnView: 'inbox' | 'chat' | null = null;
+let settingsScrollTop = 0;
+let connectionAttempt = 0;
+let inboxRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let connectionError = '';
 let connection = readStored<Connection>('codex-reach-connection');
 let client = connection ? new ReachClient(connection) : null;
 let connected = false;
@@ -56,17 +62,69 @@ function stateLabel(status: string): string {
 function showView(view: typeof currentView): void {
   currentView = view;
   for (const name of views) element(`${name}-view`).hidden = name !== view;
+  document.querySelector<HTMLElement>('.app-header')!.hidden = view === 'chat';
+  element('settings-button').hidden = view === 'connection';
+  renderConnection();
+}
+
+function renderConnection(): void {
+  element('reconnect-notice').hidden = !connection || connected || currentView === 'connection';
+  element('reconnect-text').textContent = `正在重连，当前内容和草稿已保留。${connectionError}`;
+}
+
+function stopUpdates(): void {
+  generation += 1;
+  clearTimeout(inboxRetryTimer);
+  inboxRetryTimer = undefined;
+  refreshButton.disabled = false;
+  refreshButton.textContent = '刷新';
+  refreshButton.removeAttribute('aria-busy');
+}
+
+function resumeChat(): void {
+  if (!selected || !foreground) return;
+  stopUpdates();
+  revision = null;
+  void followChat(selected.id, generation);
 }
 
 function openSettings(): void {
-  generation += 1;
+  if (currentView === 'connection') return;
+  settingsReturnView = currentView;
+  settingsScrollTop = scroll.scrollTop;
+  stopUpdates();
   urlInput.value = connection?.url ?? '';
   keyInput.value = connection?.key ?? '';
+  element('cancel-settings').hidden = false;
+  element('cancel-settings').textContent = currentView === 'chat' ? '返回对话' : '返回列表';
   showView('connection');
 }
 
+function closeSettings(): void {
+  if (!settingsReturnView) return;
+  connectionAttempt += 1;
+  connectButton.disabled = false;
+  connectButton.textContent = '连接';
+  const destination = settingsReturnView;
+  settingsReturnView = null;
+  inform();
+  showView(destination);
+  if (destination === 'chat') {
+    scroll.scrollTop = settingsScrollTop;
+    resumeChat();
+  } else void refreshInbox();
+}
+
+function backToInbox(): void {
+  stopUpdates();
+  showView('inbox');
+  void refreshInbox();
+}
+
 async function connect(): Promise<void> {
+  const attempt = ++connectionAttempt;
   connectButton.disabled = true;
+  connectButton.textContent = '连接中…';
   inform('正在连接电脑…');
   try {
     const url = new URL(urlInput.value.trim());
@@ -76,27 +134,48 @@ async function connect(): Promise<void> {
     const candidate: Connection = { url: url.origin, key: keyInput.value.trim(), serverId: '' };
     const nextClient = new ReachClient(candidate);
     const status = await nextClient.request<{ serverId: string }>('/status');
+    if (attempt !== connectionAttempt) return;
     candidate.serverId = status.serverId;
-    generation += 1;
+    const sameServer = candidate.serverId === connection?.serverId;
+    const returnToChat = settingsReturnView === 'chat' && sameServer;
+    stopUpdates();
+    if (!sameServer) {
+      projects = [];
+      threads = [];
+      nextThreads = null;
+      selected = null;
+      renderInbox();
+    }
     connection = candidate;
     client = nextClient;
     connected = true;
+    connectionError = '';
     localStorage.setItem('codex-reach-connection', JSON.stringify(candidate));
-    await loadInbox();
-    showView('inbox');
     inform();
+    if (returnToChat) closeSettings();
+    else {
+      settingsReturnView = null;
+      showView('inbox');
+      void refreshInbox();
+    }
   } catch (error) {
-    connected = false;
+    if (attempt !== connectionAttempt) return;
     inform(errorText(error));
-  } finally { connectButton.disabled = false; }
+  } finally {
+    if (attempt === connectionAttempt) {
+      connectButton.disabled = false;
+      connectButton.textContent = '连接';
+    }
+  }
 }
 
-async function loadInbox(): Promise<void> {
+async function loadInbox(token: number): Promise<void> {
   if (!client) return;
   const [projectResult, threadResult] = await Promise.all([
     client.request<{ projects: Project[] }>('/projects'),
     client.request<{ threads: Thread[]; nextCursor: string | null }>('/threads'),
   ]);
+  if (token !== generation) return;
   projects = projectResult.projects;
   threads = threadResult.threads;
   nextThreads = threadResult.nextCursor;
@@ -105,12 +184,48 @@ async function loadInbox(): Promise<void> {
   for (const project of projects) projectFilter.add(new Option(project.name, project.id));
   projectFilter.value = selectedProject;
   renderInbox();
+  const selectedThread = threads.find(thread => thread.id === selected?.id);
+  if (selected && selectedThread?.title) {
+    selected.title = selectedThread.title;
+    if (currentView === 'chat') renderChat();
+    scheduleCache();
+  }
+}
+
+async function refreshInbox(): Promise<void> {
+  if (!client || !foreground || currentView !== 'inbox') return;
+  stopUpdates();
+  const token = generation;
+  refreshButton.disabled = true;
+  refreshButton.textContent = '刷新中…';
+  refreshButton.setAttribute('aria-busy', 'true');
+  element('refresh-status').textContent = '';
+  try {
+    await loadInbox(token);
+    if (token !== generation) return;
+    connected = true;
+    connectionError = '';
+    element('refresh-status').textContent = `已刷新 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  } catch (error) {
+    if (token !== generation) return;
+    connected = false;
+    connectionError = errorText(error);
+    element('refresh-status').textContent = '刷新失败';
+    inboxRetryTimer = setTimeout(() => void refreshInbox(), 2000);
+  } finally {
+    if (token === generation) {
+      refreshButton.disabled = false;
+      refreshButton.textContent = '刷新';
+      refreshButton.removeAttribute('aria-busy');
+      renderConnection();
+    }
+  }
 }
 
 function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
-  const visible = threads.filter(thread => (!query || thread.title.toLocaleLowerCase().includes(query))
+  const visible = threads.filter(thread => (!query || (thread.title || '').toLocaleLowerCase().includes(query))
     && (!projectId || (projectId === '__none__' ? !thread.projectId : thread.projectId === projectId)));
   const fragment = document.createDocumentFragment();
   for (const thread of visible) {
@@ -150,13 +265,14 @@ async function refreshHistory(id: string, token: number): Promise<void> {
 }
 
 async function openChat(id: string): Promise<void> {
-  const token = ++generation;
+  stopUpdates();
+  const token = generation;
   revision = null;
   liveWaiting = false;
   liveModel = '';
   renderedMessages.clear();
   const thread = threads.find(item => item.id === id);
-  selected = { id, title: thread?.title ?? '读取对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
+  selected = { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
   pending = readStored(storageKey('pending', id));
   messageInput.value = localStorage.getItem(storageKey('draft', id)) ?? '';
   localStorage.setItem(storageKey('last-chat'), id);
@@ -169,6 +285,7 @@ async function openChat(id: string): Promise<void> {
     await refreshHistory(id, token);
     if (token !== generation) return;
     connected = true;
+    connectionError = '';
     inform();
     renderChat(true);
     if (pending) void checkReceipt(token).catch(error => inform(errorText(error)));
@@ -176,7 +293,7 @@ async function openChat(id: string): Promise<void> {
   } catch (error) {
     if (token !== generation) return;
     connected = false;
-    inform(`连接中断，已保留当前内容和草稿。${errorText(error)}`);
+    connectionError = errorText(error);
     renderChat();
     void followChat(id, token);
   }
@@ -184,16 +301,24 @@ async function openChat(id: string): Promise<void> {
 
 async function followChat(id: string, token: number): Promise<void> {
   let previousStatus = selected?.status;
+  let refreshNeeded = true;
   while (token === generation && foreground && currentView === 'chat') {
     try {
       const query = revision ? `?after=${encodeURIComponent(revision)}` : '';
       const view = await client!.request<LiveView>(`/threads/${encodeURIComponent(id)}/live${query}`);
       if (token !== generation || !selected) return;
-      const wasDisconnected = !connected;
+      if (refreshNeeded || !connected) {
+        await refreshHistory(id, token);
+        if (token !== generation || !selected) return;
+        refreshNeeded = false;
+      }
       connected = true;
-      if (wasDisconnected) { inform(); await refreshHistory(id, token); }
+      connectionError = '';
       if (!view.available) {
         await refreshHistory(id, token);
+        if (token !== generation) return;
+        renderChat();
+        if (pending) await checkReceipt(token);
         await new Promise(resolve => setTimeout(resolve, 3000));
         continue;
       }
@@ -211,6 +336,7 @@ async function followChat(id: string, token: number): Promise<void> {
       renderChat();
       scheduleCache();
       if (previousStatus === 'active' && selected.status !== 'active') await refreshHistory(id, token);
+      if (token !== generation) return;
       previousStatus = selected.status;
       if (pending) await checkReceipt(token);
       await new Promise(resolve => setTimeout(resolve, 120));
@@ -218,7 +344,7 @@ async function followChat(id: string, token: number): Promise<void> {
       if (token !== generation) return;
       connected = false;
       revision = null;
-      inform(`连接中断，已保留当前内容和草稿。${errorText(error)}`);
+      connectionError = errorText(error);
       renderChat();
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
@@ -254,9 +380,11 @@ function renderMessage(message: Message, key: string): HTMLElement {
 function renderChat(forceBottom = false): void {
   if (!selected) return;
   const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
-  element('chat-title').textContent = selected.title;
+  element('chat-title').textContent = selected.title || '未命名对话';
+  element('chat-title').title = selected.title || '未命名对话';
   element('chat-meta').textContent = [selected.cwd, liveModel].filter(Boolean).join(' · ');
-  element('chat-state').textContent = connected ? stateLabel(selected.status) : '离线';
+  element('chat-state').textContent = connected ? stateLabel(selected.status) : '重连中';
+  renderConnection();
   olderButton.hidden = !selected.hasMore;
   olderButton.disabled = !connected;
   const fragment = document.createDocumentFragment();
@@ -359,10 +487,16 @@ async function sendMessage(): Promise<void> {
 
 element('connection-form').addEventListener('submit', event => { event.preventDefault(); void connect(); });
 element('settings-button').addEventListener('click', openSettings);
-element('back-button').addEventListener('click', () => { generation += 1; showView('inbox'); void loadInbox().catch(error => inform(errorText(error))); });
+element('chat-settings-button').addEventListener('click', openSettings);
+element('cancel-settings').addEventListener('click', closeSettings);
+element('back-button').addEventListener('click', backToInbox);
+element('reconnect-button').addEventListener('click', () => {
+  if (currentView === 'chat') resumeChat();
+  else void refreshInbox();
+});
 projectFilter.addEventListener('change', renderInbox);
 searchInput.addEventListener('input', renderInbox);
-element('refresh-button').addEventListener('click', () => void loadInbox().then(() => inform()).catch(error => inform(errorText(error))));
+refreshButton.addEventListener('click', () => void refreshInbox());
 element('more-threads').addEventListener('click', async () => {
   if (!client || !nextThreads) return;
   const button = element<HTMLButtonElement>('more-threads');
@@ -410,14 +544,15 @@ element('resolve-delivery').addEventListener('click', () => {
 
 if (Capacitor.getPlatform() === 'android') {
   void App.addListener('backButton', () => {
-    if (currentView === 'chat') { generation += 1; showView('inbox'); }
-    else if (currentView === 'connection' && connected) showView('inbox');
+    if (currentView === 'chat') backToInbox();
+    else if (currentView === 'connection' && settingsReturnView) closeSettings();
     else void App.minimizeApp();
   });
   void App.addListener('appStateChange', ({ isActive }) => {
     foreground = isActive;
-    generation += 1;
-    if (isActive && currentView === 'chat' && selected) void openChat(selected.id);
+    stopUpdates();
+    if (isActive && currentView === 'chat') resumeChat();
+    else if (isActive && currentView === 'inbox') void refreshInbox();
     else if (!isActive) void flushCache();
   });
 }
@@ -426,10 +561,14 @@ await cache.open().catch(error => inform(`本地缓存不可用。${errorText(er
 connectButton.disabled = false;
 urlInput.value = connection?.url ?? '';
 keyInput.value = connection?.key ?? '';
+showView('connection');
 if (connection) {
   const lastChat = localStorage.getItem(storageKey('last-chat'));
   if (lastChat) {
     await openChat(lastChat);
-    void loadInbox().catch(error => inform(errorText(error)));
-  } else await connect();
+    void loadInbox(generation).catch(() => {});
+  } else {
+    showView('inbox');
+    void refreshInbox();
+  }
 }

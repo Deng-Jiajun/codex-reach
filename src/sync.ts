@@ -10,11 +10,11 @@ export function mergeTail(current: Turn[], incoming: Turn[], complete: boolean):
 
 export function mergeHistory(current: HistoryPage, incoming: HistoryPage): HistoryPage {
   const turns = mergeTail(current.turns, incoming.turns, !incoming.hasMore);
-  if (!turns) return incoming;
-  const retainedOlder = turns.length > incoming.turns.length;
+  const retainedOlder = turns !== null && turns.length > incoming.turns.length;
   return {
     ...incoming,
-    turns,
+    title: incoming.title || current.title || '未命名对话',
+    turns: turns ?? incoming.turns,
     nextCursor: retainedOlder ? current.nextCursor : incoming.nextCursor,
     hasMore: retainedOlder ? current.hasMore : incoming.hasMore,
   };

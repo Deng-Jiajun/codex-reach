@@ -5,12 +5,15 @@ import static org.junit.Assert.assertTrue;
 
 import android.graphics.Bitmap;
 import android.os.SystemClock;
+import android.view.KeyEvent;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -33,16 +36,52 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#notice').textContent.includes('访问密钥无效') && !document.querySelector('#connect-button').disabled");
                 evaluate(webView, "document.querySelector('#server-key').value='fixture-access'; document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "!document.querySelector('#inbox-view').hidden && Boolean(document.querySelector('[data-thread-id=\"fixture-chat\"]'))");
+                evaluate(webView, "document.querySelector('#refresh-button').click(); null");
+                assertEquals("true", evaluate(webView, "document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-button').textContent==='刷新中…'"));
+                await(webView, "!document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
                 await(webView, "document.querySelector('#messages').textContent.includes('连接已准备就绪')");
+                assertEquals("true", evaluate(webView, "document.querySelector('#chat-title').textContent==='连接与缓存验证' && document.querySelector('.app-header').hidden"));
                 evaluate(webView, "document.querySelector('#message-input').value='请验证消息收发'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#message-form').requestSubmit(); null");
                 await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#delivery-note').hidden");
                 assertEquals("true", evaluate(webView, "!window.fixtureScriptExecuted && Boolean(document.querySelector('#messages table')) && Boolean(document.querySelector('#messages pre'))"));
                 evaluate(webView, "document.querySelector('#message-input').value='保留的手机草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); null");
+                evaluate(webView, "document.querySelector('#messages-scroll').scrollTop=10; window.savedScrollTop=document.querySelector('#messages-scroll').scrollTop; document.querySelector('#chat-settings-button').click(); null");
+                await(webView, "!document.querySelector('#connection-view').hidden && !document.querySelector('#cancel-settings').hidden");
+                evaluate(webView, "document.querySelector('#server-key').value='wrong-key'; document.querySelector('#connection-form').requestSubmit(); null");
+                await(webView, "document.querySelector('#notice').textContent.includes('访问密钥无效') && !document.querySelector('#connect-button').disabled");
+                evaluate(webView, "document.querySelector('#cancel-settings').click(); null");
+                await(webView, "!document.querySelector('#chat-view').hidden");
+                assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿' && Math.abs(document.querySelector('#messages-scroll').scrollTop-window.savedScrollTop)<2"));
+                evaluate(webView, "document.querySelector('#chat-settings-button').click(); document.querySelector('#connection-form').requestSubmit(); null");
+                await(webView, "!document.querySelector('#chat-view').hidden");
+                assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
+
+                control("offline");
+                await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('#chat-state').textContent==='重连中'");
+                evaluate(webView, "document.querySelector('#chat-settings-button').click(); null");
+                InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+                await(webView, "!document.querySelector('#chat-view').hidden");
+                assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
+                evaluate(webView, "document.querySelector('#reconnect-button').click(); null");
+                control("online");
+                await(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#messages').textContent.includes('REACH_RECONNECTED')");
+
+                evaluate(webView, "document.querySelector('#back-button').click(); null");
+                await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
+                control("offline");
+                evaluate(webView, "document.querySelector('#refresh-button').click(); null");
+                await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('#refresh-status').textContent==='刷新失败'");
+                control("online");
+                await(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
+                evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
+                await(webView, "document.querySelector('#chat-state').textContent==='空闲' && document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
                 SystemClock.sleep(1200);
+                assertEquals("true", evaluate(webView, "!document.querySelector('#notice').textContent.includes('缓存') && document.querySelector('#message-input').value==='保留的手机草稿'"));
             } else {
                 assertEquals("chat-persist", stage);
-                await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#chat-state').textContent==='离线'");
+                await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#chat-state').textContent==='重连中'");
+                assertEquals("true", evaluate(webView, "document.querySelector('#chat-title').textContent==='连接与缓存验证'"));
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
             }
 
@@ -55,6 +94,18 @@ public class ChatFlowTest {
                 assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output));
                 bitmap.recycle();
             }
+        }
+    }
+
+    private void control(String mode) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) URI.create("http://10.0.2.2:4320/control/" + mode).toURL().openConnection();
+        try {
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(5000);
+            connection.setReadTimeout(5000);
+            assertEquals(200, connection.getResponseCode());
+        } finally {
+            connection.disconnect();
         }
     }
 

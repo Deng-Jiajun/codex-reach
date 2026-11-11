@@ -13,9 +13,16 @@
         <button id="settings-button" class="quiet" type="button">连接设置</button>
       </header>
       <p id="notice" role="status" aria-live="polite" hidden></p>
+      <div id="reconnect-notice" role="status" aria-live="polite" hidden>
+        <span id="reconnect-text"></span>
+        <button id="reconnect-button" class="quiet" type="button">立即重连</button>
+      </div>
       <main id="connection-view" class="connection-view">
         <section class="connection-card">
-          <h1>连接电脑</h1>
+          <div class="connection-heading">
+            <h1>连接电脑</h1>
+            <button id="cancel-settings" class="quiet" type="button" hidden>返回</button>
+          </div>
           <p>打开电脑上的 Codex Reach 服务，手机连接同一 Tailscale 网络。</p>
           <form id="connection-form">
             <label for="server-url">服务地址</label>
@@ -31,7 +38,10 @@
       <main id="inbox-view" class="inbox-view" hidden>
         <div class="inbox-heading">
           <h1>对话</h1>
-          <button id="refresh-button" class="quiet" type="button">刷新</button>
+          <div class="refresh-controls">
+            <span id="refresh-status" role="status" aria-live="polite"></span>
+            <button id="refresh-button" class="quiet" type="button">刷新</button>
+          </div>
         </div>
         <div class="filters">
           <label class="sr-only" for="project-filter">项目</label>
@@ -45,8 +55,11 @@
       <main id="chat-view" class="chat-view" hidden>
         <header class="chat-header">
           <button id="back-button" class="quiet back" type="button" aria-label="返回对话列表">‹</button>
-          <div class="chat-heading"><h1 id="chat-title"></h1><p id="chat-meta"></p></div>
-          <span id="chat-state" class="state"></span>
+          <div class="chat-heading">
+            <h1 id="chat-title"></h1>
+            <div class="chat-metadata"><p id="chat-meta"></p><span id="chat-state" class="state"></span></div>
+          </div>
+          <button id="chat-settings-button" class="quiet" type="button" aria-label="连接设置">设置</button>
         </header>
         <div id="messages-scroll" class="messages-scroll">
           <button id="older-button" class="quiet more" type="button" hidden>读取更早的消息</button>

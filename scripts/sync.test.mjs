@@ -22,3 +22,17 @@ test('a complete replacement removes the edited turn id', () => {
 test('an unanchored partial stream asks its caller to refresh history', () => {
   assert.equal(mergeTail([turn('old')], [turn('new')], false), null);
 });
+
+test('missing history titles preserve the title loaded from the conversation list', () => {
+  for (const title of [null, undefined, '']) {
+    const incoming = { ...page(['new'], 'earlier'), title };
+    const result = mergeHistory(page(['old'], null), incoming);
+    assert.equal(result.title, 'Chat');
+    assert.deepEqual(result.turns.map(turn => turn.id), ['new']);
+  }
+});
+
+test('a conversation with no title can still be saved in the cache', () => {
+  const result = mergeHistory({ ...page([], null), title: '' }, { ...page(['new'], null), title: null });
+  assert.equal(result.title, '未命名对话');
+});

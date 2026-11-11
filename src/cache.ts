@@ -55,7 +55,7 @@ export class ChatCache {
       {
         statement: `INSERT OR REPLACE INTO cached_chats
           (server_id, chat_id, title, cwd, status, revision, next_cursor, has_more) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        values: [...key, page.title, page.cwd, page.status, revision, page.nextCursor, page.hasMore ? 1 : 0],
+        values: [...key, page.title || '未命名对话', page.cwd, page.status, revision, page.nextCursor, page.hasMore ? 1 : 0],
       },
     ];
     page.turns.slice(-10).forEach((turn, position) => {
