@@ -5,11 +5,12 @@ import { marked } from 'marked';
 import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
+import { groupMessages, type MessageGroup } from './transcript';
 import { populateParameters, selectedParameters, updateThinking } from './task-options';
 import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
 import { openFilePicker, renderAttachments, type FileAttachment } from './files';
-import { openChatActions, openQuote } from './chat-actions';
-import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, Skill, Thread, TurnOptions } from './types';
+import { annotationPrompt, openAnnotation, renderAnnotations, selectedMessageText, type TextSelection } from './chat-actions';
+import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, ResponseAnnotation, Skill, Thread, Turn, TurnOptions } from './types';
 import './style.css';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -54,6 +55,10 @@ let runtimeStatus: string | null = null;
 let activeTurnId: string | null = null;
 let turnOptions: TurnOptions = {};
 let modelChoices: ModelChoice[] = [];
+let selectedPinned: boolean | undefined;
+const pinRequests = new Set<string>();
+const pinRevisions = new Map<string, number>();
+const pinIcon = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l-1 7 4 4v2H5v-2l4-4-1-7ZM12 16v5"/></svg>';
 let dialogRequest = 0;
 let newFormLoading = false;
 let newFormError = '';
@@ -62,6 +67,7 @@ let skillsChatId = '';
 let skillChoices: Skill[] = [];
 let selectedSkills: Skill[] = [];
 let selectedFiles: FileAttachment[] = [];
+let selectedAnnotations: ResponseAnnotation[] = [];
 let skillDraft = new Set<string>();
 let liveRequests: PendingRequest[] = [];
 let editableTurn: EditableTurn | null = null;
@@ -88,7 +94,8 @@ let generation = 0;
 let foreground = true;
 let liveWaiting = false;
 let liveModel = '';
-let pending: { requestId: string; prompt: string; status?: string; error?: string; options?: TurnOptions; questionReplies?: QuestionReply[] } | null = null;
+let liveThinking = '';
+let pending: { requestId: string; prompt: string; status?: string; error?: string; options?: TurnOptions; questionReplies?: QuestionReply[]; annotations?: ResponseAnnotation[] } | null = null;
 let cacheTimer: ReturnType<typeof setTimeout> | undefined;
 let cacheWriting = false;
 const pendingCache = new Map<string, { serverId: string; page: HistoryPage; revision: string | null }>();
@@ -103,7 +110,7 @@ function errorText(error: unknown): string { return error instanceof Error ? err
 function inform(text = ''): void { notice.textContent = text; notice.hidden = !text; }
 function storageKey(kind: string, id = ''): string { return `codex-reach-${kind}:${connection?.serverId}:${id}`; }
 function stateLabel(status: string): string {
-  return ({ active: '进行中', inProgress: '进行中', idle: '空闲', completed: '已完成', failed: '失败', interrupted: '已停止', systemError: '异常' } as Record<string, string>)[status] ?? '';
+  return ({ active: '进行中', inProgress: '进行中', completed: '已完成', failed: '失败', interrupted: '已停止', systemError: '异常' } as Record<string, string>)[status] ?? '';
 }
 
 function clearRuntimeStatus(): void {
@@ -209,8 +216,12 @@ async function connect(): Promise<void> {
     const sameServer = candidate.serverId === connection?.serverId;
     const returnToChat = settingsReturnView === 'chat' && sameServer;
     stopUpdates();
+    pinRequests.clear();
+    pinRevisions.clear();
     if (!sameServer) {
       projects = [];
+      modelChoices = [];
+      selectedPinned = undefined;
       threads = [];
       nextThreads = null;
       selected = null;
@@ -242,13 +253,22 @@ async function connect(): Promise<void> {
 
 async function loadInbox(token: number): Promise<void> {
   if (!client) return;
+  void client.loadModels().catch(() => {});
+  const revisions = new Map(pinRevisions);
   const [projectResult, threadResult] = await Promise.all([
     client.request<{ projects: Project[] }>('/projects'),
     client.request<{ threads: Thread[]; nextCursor: string | null }>('/threads'),
   ]);
   if (token !== generation) return;
   projects = projectResult.projects;
-  threads = threadResult.threads;
+  threads = threadResult.threads.map(thread => {
+    thread.pinned = Boolean(thread.pinned);
+    const current = threads.find(item => item.id === thread.id);
+    if (current && (pinRequests.has(thread.id) || revisions.get(thread.id) !== pinRevisions.get(thread.id))) {
+      thread.pinned = current.pinned;
+    }
+    return thread;
+  });
   nextThreads = threadResult.nextCursor;
   const selectedProject = projectFilter.value;
   projectFilter.replaceChildren(new Option('全部项目', ''), new Option('无项目', '__none__'));
@@ -256,6 +276,7 @@ async function loadInbox(token: number): Promise<void> {
   projectFilter.value = selectedProject;
   renderInbox();
   const selectedThread = threads.find(thread => thread.id === selected?.id);
+  if (selectedThread) selectedPinned = Boolean(selectedThread.pinned);
   if (selected && selectedThread?.title) {
     selected.title = selectedThread.title;
     if (currentView === 'chat') renderChat();
@@ -296,6 +317,46 @@ async function refreshInbox(): Promise<void> {
   }
 }
 
+function renderPin(button: HTMLButtonElement, id: string): void {
+  const pinned = threads.find(item => item.id === id)?.pinned ?? (selected?.id === id ? selectedPinned : undefined);
+  const label = pinned === undefined ? '读取置顶状态' : pinned ? '取消置顶' : '置顶对话';
+  button.innerHTML = pinIcon;
+  button.setAttribute('aria-pressed', String(Boolean(pinned)));
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.setAttribute('aria-busy', String(pinRequests.has(id)));
+  button.disabled = !connected || pinRequests.has(id);
+}
+
+async function togglePin(id: string): Promise<void> {
+  if (!client || !connected || pinRequests.has(id)) return;
+  const pinned = threads.find(item => item.id === id)?.pinned ?? (selected?.id === id ? selectedPinned : undefined);
+  const pinClient = client;
+  pinRequests.add(id);
+  pinRevisions.set(id, (pinRevisions.get(id) ?? 0) + 1);
+  renderInbox();
+  if (selected) renderPin(element<HTMLButtonElement>('chat-pin-button'), selected.id);
+  try {
+    const path = `/threads/${encodeURIComponent(id)}/pin`;
+    const result = pinned === undefined
+      ? await pinClient.request<{ pinned: boolean }>(path)
+      : await pinClient.request<{ pinned: boolean }>(path, 'POST', { pinned: !pinned });
+    if (client !== pinClient) return;
+    const current = threads.find(item => item.id === id);
+    if (current) current.pinned = result.pinned;
+    if (selected?.id === id) selectedPinned = result.pinned;
+  } catch (error) {
+    if (client === pinClient) inform(`置顶状态未确认，可重试或刷新列表核对。${errorText(error)}`);
+  } finally {
+    if (client === pinClient) {
+      pinRequests.delete(id);
+      pinRevisions.set(id, (pinRevisions.get(id) ?? 0) + 1);
+      renderInbox();
+      if (selected) renderPin(element<HTMLButtonElement>('chat-pin-button'), selected.id);
+    }
+  }
+}
+
 function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
@@ -304,6 +365,14 @@ function renderInbox(): void {
     .sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
   const fragment = document.createDocumentFragment();
   for (const thread of visible) {
+    const row = document.createElement('div');
+    row.className = 'thread-entry';
+    const pin = document.createElement('button');
+    pin.className = 'quiet icon-button pin-button';
+    pin.type = 'button';
+    pin.dataset.pinId = thread.id;
+    renderPin(pin, thread.id);
+    pin.addEventListener('click', () => void togglePin(thread.id));
     const button = document.createElement('button');
     button.className = 'thread-row';
     button.type = 'button';
@@ -314,11 +383,12 @@ function renderInbox(): void {
     const metadata = document.createElement('span');
     metadata.className = 'thread-meta';
     const project = projects.find(item => item.id === thread.projectId);
-    const date = new Date(thread.updatedAt * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-    metadata.textContent = [thread.pinned ? '置顶' : '', project?.name ?? '无项目', date, stateLabel(thread.status)].filter(Boolean).join(' · ');
+    const date = new Date(thread.updatedAt * 1000).toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' });
+    metadata.textContent = [project?.name ?? '无项目', date, stateLabel(thread.status)].filter(Boolean).join(' · ');
     button.append(title, metadata);
     button.addEventListener('click', () => void openChat(thread.id));
-    fragment.append(button);
+    row.append(pin, button);
+    fragment.append(row);
   }
   if (!visible.length) {
     const empty = document.createElement('p');
@@ -378,13 +448,14 @@ async function reportReadError(error: unknown, token: number, kind: 'history' | 
   renderChat();
 }
 
-async function openChat(id: string): Promise<void> {
+async function openChat(id: string, pinned?: boolean): Promise<void> {
   stopUpdates();
   const token = generation;
   revision = null;
   liveWaiting = false;
   liveRequests = [];
   liveModel = '';
+  liveThinking = '';
   historyLoaded = false;
   opening = true;
   syncing = true;
@@ -393,12 +464,14 @@ async function openChat(id: string): Promise<void> {
   streamError = '';
   renderedMessages.clear();
   const thread = threads.find(item => item.id === id);
+  selectedPinned = pinned ?? (thread ? Boolean(thread.pinned) : undefined);
   selected = { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
   pending = readStored(storageKey('pending', id));
   stopOperation = readStored(storageKey('stop', id));
   interaction = readStored(storageKey('interaction', id));
   selectedSkills = readStored<Skill[]>(storageKey('skills', id)) ?? [];
   selectedFiles = readStored<FileAttachment[]>(storageKey('attachments', id)) ?? [];
+  selectedAnnotations = readStored<ResponseAnnotation[]>(storageKey('annotations', id)) ?? [];
   questionReplies = readStored<QuestionReply[]>(storageKey('question-replies', id)) ?? [];
   questionDrafts = readStored<QuestionReply[]>(storageKey('question-drafts', id)) ?? pending?.questionReplies ?? [];
   turnOptions = readStored<TurnOptions>(storageKey('options', id)) ?? {};
@@ -406,6 +479,7 @@ async function openChat(id: string): Promise<void> {
   localStorage.setItem(storageKey('last-chat'), id);
   showView('chat');
   renderChat(true);
+  if (selectedPinned === undefined && connected) void togglePin(id);
   try {
     const saved = connection ? await cache.load(connection.serverId, id).catch(error => {
       if (token === generation) inform(`本地缓存读取失败。${errorText(error)}`);
@@ -484,6 +558,7 @@ async function followChat(id: string, token: number): Promise<void> {
       editableTurn = view.editableTurn ?? null;
       if (interaction?.kind === 'respond' && !liveRequests.some(request => request.id === interaction?.approvalRequestId)) clearInteraction();
       liveModel = view.model ?? '';
+      liveThinking = view.thinking ?? '';
       syncing = false;
       settleStopFromRuntime();
       renderChat();
@@ -505,7 +580,7 @@ async function followChat(id: string, token: number): Promise<void> {
   }
 }
 
-function renderMessage(message: Message, key: string, answers: Map<string, string>): HTMLElement {
+function renderMessage(message: Message, key: string, answers: Map<string, string>, process = false): HTMLElement {
   let node = renderedMessages.get(key);
   if (!node) {
     node = document.createElement('article');
@@ -526,24 +601,29 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     const actions = document.createElement('div');
     actions.className = 'message-actions';
     node.append(actions);
-    if (message.kind === 'user' || message.kind === 'assistant') {
+    const annotations = document.createElement('div');
+    annotations.className = 'message-annotations';
+    node.prepend(annotations);
+    if (message.kind === 'assistant') {
       const quote = document.createElement('button');
       quote.type = 'button';
       quote.className = 'quiet quote-message';
-      quote.textContent = '引用';
-      let selectedText = '';
+      quote.textContent = '添加到对话';
+      let selection: TextSelection | undefined;
       quote.addEventListener('pointerdown', () => {
-        const selection = window.getSelection();
-        selectedText = selection && content.contains(selection.anchorNode) && content.contains(selection.focusNode) ? selection.toString() : '';
+        selection = selectedMessageText(content);
       });
       quote.addEventListener('click', () => {
         if (!selected) return;
-        openQuote(selectedText || node!.dataset.body || '', selected, message.id, quoteText => {
-          messageInput.value = `${messageInput.value}${messageInput.value ? '\n\n' : ''}${quoteText}`;
-          messageInput.dispatchEvent(new Event('input'));
+        const chatId = selected.id;
+        openAnnotation(content.textContent ?? '', message.id, selection, '', annotation => {
+          if (selected?.id !== chatId) return;
+          selectedAnnotations.push(annotation);
+          localStorage.setItem(storageKey('annotations', chatId), JSON.stringify(selectedAnnotations));
+          renderChat();
           messageInput.focus();
         });
-        selectedText = '';
+        selection = undefined;
       });
       actions.append(quote);
     }
@@ -557,6 +637,8 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     }
     renderedMessages.set(key, node);
   }
+  node.classList.toggle('process-message', process);
+  node.querySelector<HTMLElement>('.message-actions')!.hidden = process;
   const questionText = message.questions?.map(question => [question.title, ...(question.options ?? []).map(option => `- ${option}`)].join('\n')).join('\n\n');
   const body = message.questionReplies?.length ? message.questionReplies.map(reply => `${reply.question}\n${reply.answer}`).join('\n\n')
     : questionText === message.text ? '' : message.text;
@@ -569,7 +651,11 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
   }
   const edit = node.querySelector<HTMLButtonElement>('.edit-message');
   const quote = node.querySelector<HTMLButtonElement>('.quote-message');
-  if (quote) quote.hidden = !body;
+  if (quote) {
+    quote.hidden = !body;
+    quote.disabled = Boolean(pending);
+  }
+  renderAnnotations(node.querySelector<HTMLElement>('.message-annotations')!, message.responseAnnotations ?? []);
   renderAttachments(node.querySelector<HTMLElement>('.message-attachments')!, message.attachments ?? [], { client });
   if (edit) {
     edit.hidden = !editableTurn || key !== `${editableTurn.turnId}:${editableTurn.messageId}`;
@@ -590,13 +676,47 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
   return node;
 }
 
+function renderProcess(group: MessageGroup, turn: Turn, answers: Map<string, string>, used: Set<HTMLElement>, active: boolean): HTMLElement {
+  // Reuse a group through live updates and pages that prepend older process items
+  let node = group.messages.map(message => renderedMessages.get(`${turn.id}:${message.id}`)
+    ?.closest<HTMLDetailsElement>('.turn-process')).find(node => node && !used.has(node));
+  if (!node) {
+    node = document.createElement('details');
+    node.className = 'turn-process';
+    node.innerHTML = '<summary><span class="process-title"></span><span class="process-preview" hidden></span></summary><div class="process-messages"></div>';
+  }
+  used.add(node);
+  node.dataset.turnId = turn.id;
+  node.querySelector('.process-title')!.textContent = active ? '执行中…'
+    : turn.status === 'failed' ? '执行过程（失败）'
+    : turn.status === 'interrupted' ? '执行过程（已停止）' : '执行过程';
+  const preview = node.querySelector<HTMLElement>('.process-preview')!;
+  const progress = group.messages.slice().reverse().find(message => message.kind === 'assistant');
+  preview.textContent = active ? progress?.text.trim().split('\n')[0] ?? '' : '';
+  preview.hidden = !preview.textContent;
+  const messages = node.querySelector<HTMLElement>('.process-messages')!;
+  let position = messages.firstElementChild;
+  for (const message of group.messages) {
+    const item = renderMessage(message, `${turn.id}:${message.id}`, answers, true);
+    if (item !== position) messages.insertBefore(item, position);
+    position = item.nextElementSibling;
+  }
+  while (position) { const next = position.nextElementSibling; position.remove(); position = next; }
+  return node;
+}
+
 function renderChat(forceBottom = false): void {
   if (!selected) return;
   const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
   element('chat-title').textContent = selected.title || '未命名对话';
   element('chat-title').title = selected.title || '未命名对话';
-  element('chat-meta').textContent = [selected.cwd, liveModel].filter(Boolean).join(' · ');
+  element('chat-meta').textContent = [selected.cwd, liveModel, liveThinking].filter(Boolean).join(' · ');
   element('chat-state').textContent = stateLabel(runtimeStatus ?? '');
+  element('chat-state').dataset.status = runtimeStatus ?? '';
+  element('chat-state').hidden = !element('chat-state').textContent;
+  if (optionsDialog.open && optionsChatId === selected.id && runtimeStatus !== null && liveModel && liveThinking) {
+    element('options-current').textContent = `当前会话使用 ${liveModel} · ${liveThinking}`;
+  }
   element('chat-error').hidden = !historyError && !streamError;
   element('chat-error-text').textContent = [historyError, streamError].filter(Boolean).join(' ');
   renderConnection();
@@ -635,11 +755,15 @@ function renderChat(forceBottom = false): void {
     questionDrafts = remainingDrafts;
     localStorage.setItem(storageKey('question-drafts', selected.id), JSON.stringify(questionDrafts));
   }
+  const usedGroups = new Set<HTMLElement>();
   for (const turn of selected.turns) {
-    for (const message of turn.messages) {
-      const key = `${turn.id}:${message.id}`;
-      keys.add(key);
-      const node = renderMessage(message, key, answers);
+    const groups = groupMessages(turn.messages);
+    for (const [index, group] of groups.entries()) {
+      for (const message of group.messages) keys.add(`${turn.id}:${message.id}`);
+      const message = group.messages[0];
+      const active = turn.status === 'inProgress' && index === groups.length - 1;
+      const node = group.process ? renderProcess(group, turn, answers, usedGroups, active)
+        : renderMessage(message, `${turn.id}:${message.id}`, answers);
       if (node !== position) messages.insertBefore(node, position);
       position = node.nextElementSibling;
     }
@@ -656,7 +780,7 @@ function renderChat(forceBottom = false): void {
   activity.textContent = runtimeStatus === null && liveRequests.length ? '等待电脑端重新同步请求…' : liveWaiting ? '等待处理请求' : '正在处理…';
   activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active' && !liveRequests.length);
   sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-    || (!messageInput.value.trim() && !selectedFiles.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
+    || (!messageInput.value.trim() && !selectedFiles.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
   sendButton.textContent = runtimeStatus === 'active' ? '追加' : '发送';
   stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
   stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
@@ -664,11 +788,11 @@ function renderChat(forceBottom = false): void {
   element('stop-note').hidden = !stopOperation;
   element('stop-status').textContent = stopOperation?.error ?? (stopOperation?.status === 'accepted' ? '已请求停止，正在等待轮次结束…' : '正在确认停止结果…');
   element('resolve-stop').hidden = stopOperation?.status !== 'unknown' || !activeTurnId;
-  element('parameters-button').textContent = turnOptions.model ? `${turnOptions.model} · ${turnOptions.thinking}` : '沿用会话参数';
+  element('parameters-button').textContent = turnOptions.model ? `${turnOptions.model} · ${turnOptions.thinking}` : [liveModel, liveThinking].filter(Boolean).join(' · ') || '沿用会话参数';
   element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
   element<HTMLButtonElement>('skills-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
   element<HTMLButtonElement>('files-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
-  element<HTMLButtonElement>('chat-actions-button').disabled = !connected;
+  renderPin(element<HTMLButtonElement>('chat-pin-button'), selected.id);
   element('open-attachment-chat').hidden = !selectedFiles.length || runtimeStatus !== null;
   element<HTMLButtonElement>('open-attachment-chat').disabled = !connected || opening;
   renderAttachments(element('selected-files'), selectedFiles, { client, onRemove: pending ? undefined : index => {
@@ -676,6 +800,23 @@ function renderChat(forceBottom = false): void {
     localStorage.setItem(storageKey('attachments', selected!.id), JSON.stringify(selectedFiles));
     renderChat();
   } });
+  renderAnnotations(element('selected-annotations'), selectedAnnotations, pending ? undefined : index => {
+    selectedAnnotations.splice(index, 1);
+    localStorage.setItem(storageKey('annotations', selected!.id), JSON.stringify(selectedAnnotations));
+    renderChat();
+  }, pending ? undefined : index => {
+    const annotation = selectedAnnotations[index];
+    const chatId = selected!.id;
+    const source = annotation.source!;
+    openAnnotation(annotation.text, source.messageId, { startOffset: 0, endOffset: annotation.text.length }, annotation.annotation, replacement => {
+      if (selected?.id !== chatId) return;
+      replacement.source!.startOffset += source.startOffset;
+      replacement.source!.endOffset += source.startOffset;
+      selectedAnnotations[index] = replacement;
+      localStorage.setItem(storageKey('annotations', chatId), JSON.stringify(selectedAnnotations));
+      renderChat();
+    });
+  });
   renderSelectedSkills();
   element('interaction-note').hidden = !interaction || interaction.kind !== 'edit';
   element('interaction-status').textContent = interaction?.error ?? '正在确认编辑结果…';
@@ -738,6 +879,11 @@ async function checkReceipt(token: number): Promise<void> {
       selectedFiles = selectedFiles.filter(file => !sent.has(file.path));
       localStorage.setItem(storageKey('attachments', chatId), JSON.stringify(selectedFiles));
     }
+    if (request.annotations?.length) {
+      const sent = new Set(request.annotations.map(annotation => JSON.stringify(annotation)));
+      selectedAnnotations = selectedAnnotations.filter(annotation => !sent.has(JSON.stringify(annotation)));
+      localStorage.setItem(storageKey('annotations', chatId), JSON.stringify(selectedAnnotations));
+    }
     if (request.questionReplies?.length) {
       const answered = new Map(questionReplies.map(reply => [reply.questionItemId, reply]));
       for (const reply of request.questionReplies) answered.set(reply.questionItemId, reply);
@@ -761,7 +907,7 @@ async function checkReceipt(token: number): Promise<void> {
 
 async function sendMessage(): Promise<void> {
   if (selectedFiles.length && runtimeStatus === null) return;
-  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles });
+  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles }, undefined, selectedAnnotations);
 }
 
 async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
@@ -774,17 +920,17 @@ async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
   await sendPrompt(prompt, turnOptions, replies);
 }
 
-async function sendPrompt(prompt: string, options: TurnOptions, replies?: QuestionReply[]): Promise<void> {
-  if (!selected || !client || !connected || pending || stopOperation || interaction || (!prompt.trim() && !options.attachments?.length)) return;
+async function sendPrompt(prompt: string, options: TurnOptions, replies?: QuestionReply[], annotations: ResponseAnnotation[] = []): Promise<void> {
+  if (!selected || !client || !connected || pending || stopOperation || interaction || (!prompt.trim() && !options.attachments?.length && !annotations.length)) return;
   const id = selected.id;
   const token = generation;
-  const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies };
+  const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies, annotations: [...annotations] };
   inform();
   pending = request;
   localStorage.setItem(storageKey('pending', id), JSON.stringify(request));
   renderChat();
   try {
-    await client.request(`/threads/${encodeURIComponent(id)}/messages`, 'POST', { requestId: request.requestId, prompt: request.prompt, ...request.options });
+    await client.request(`/threads/${encodeURIComponent(id)}/messages`, 'POST', { requestId: request.requestId, prompt: annotationPrompt(request.prompt, request.annotations), ...request.options });
     while (token === generation && pending?.requestId === request.requestId && pending.status !== 'unknown') {
       await checkReceipt(token);
       if (pending) await new Promise(resolve => setTimeout(resolve, 500));
@@ -818,11 +964,15 @@ function saveNewChatDraft(): void {
 }
 
 function renderCreation(): void {
-  element<HTMLFieldSetElement>('new-chat-fields').disabled = newFormLoading || Boolean(creation);
+  element<HTMLFieldSetElement>('new-chat-fields').disabled = Boolean(creation);
+  const awaitingFirstCatalog = newFormLoading && !modelChoices.length;
+  newModel.disabled = awaitingFirstCatalog;
+  newThinking.disabled = awaitingFirstCatalog || !newModel.value;
   const button = element<HTMLButtonElement>('create-chat-button');
-  button.disabled = newFormLoading || Boolean(creation);
+  button.disabled = awaitingFirstCatalog || Boolean(creation);
   button.textContent = creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送';
-  element('new-chat-status').textContent = newFormLoading ? '正在读取模型选项…'
+  const catalogStatus = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
+  element('new-chat-status').textContent = newFormLoading ? catalogStatus
     : creation?.status === 'unknown' ? '请先检查会话列表，确认是否已创建。首条消息已保留。'
     : creation ? '正在确认创建结果，返回列表后仍会保留本次请求。' : '';
   element('new-chat-status').hidden = !newFormLoading && !creation;
@@ -850,6 +1000,7 @@ async function openNewChat(): Promise<void> {
   }
   projectSelect.value = draft.projectId ?? '';
   element<HTMLTextAreaElement>('new-chat-prompt').value = draft.prompt;
+  modelChoices = client.cachedModels();
   newFormLoading = true;
   newFormError = '';
   populateParameters(newModel, newThinking, modelChoices, draft, '使用默认设置');
@@ -858,10 +1009,11 @@ async function openNewChat(): Promise<void> {
   renderCreation();
   newDialog.showModal();
   try {
-    const result = await client.request<{ models: ModelChoice[] }>('/models');
+    const models = await client.loadModels();
     if (request !== dialogRequest || connection?.serverId !== serverId) return;
-    modelChoices = result.models;
-    populateParameters(newModel, newThinking, modelChoices, draft, '使用默认设置');
+    const options = modelChoices.length ? selectedParameters(newModel, newThinking) : draft;
+    modelChoices = models;
+    populateParameters(newModel, newThinking, modelChoices, options, '使用默认设置');
   } catch (error) {
     if (request === dialogRequest) newFormError = `模型选项读取失败。${errorText(error)}`;
   } finally {
@@ -871,7 +1023,7 @@ async function openNewChat(): Promise<void> {
 }
 
 async function createChat(): Promise<void> {
-  if (!client || !connection || creation || newFormLoading) return;
+  if (!client || !connection || creation || (newFormLoading && !modelChoices.length)) return;
   const draft = newChatDraft();
   if (!draft.prompt.trim()) return;
   const serverId = connection.serverId;
@@ -929,7 +1081,7 @@ async function pollCreation(): Promise<void> {
         localStorage.removeItem(storageKey('new-chat-draft'));
         if (newDialog.open) {
           newDialog.close();
-          await openChat(threadId);
+          await openChat(threadId, false);
         } else {
           inform('新会话已创建，可在会话列表中查看。');
           if (currentView === 'inbox') await refreshInbox();
@@ -951,29 +1103,39 @@ async function pollCreation(): Promise<void> {
 async function openParameters(): Promise<void> {
   if (!client || !connection || !selected) return;
   const request = ++dialogRequest;
-  const serverId = connection.serverId;
+  const optionsClient = client;
   optionsChatId = selected.id;
   const id = optionsChatId;
-  element<HTMLButtonElement>('save-options').disabled = true;
-  element('options-current').textContent = '正在读取会话参数…';
+  const current = () => request === dialogRequest && client === optionsClient && selected?.id === id;
+  modelChoices = client.cachedModels();
+  const hasLiveSettings = runtimeStatus !== null && liveModel && liveThinking;
+  element('options-current').textContent = hasLiveSettings ? `当前会话使用 ${liveModel} · ${liveThinking}` : '正在读取会话参数…';
   showFormError('options-error');
   populateParameters(optionsModel, optionsThinking, modelChoices, turnOptions, '沿用会话设置');
-  optionsModel.disabled = true;
-  optionsThinking.disabled = true;
+  optionsModel.disabled = !modelChoices.length;
+  element<HTMLButtonElement>('save-options').disabled = !modelChoices.length;
+  element('options-catalog-status').hidden = false;
+  element('options-catalog-status').textContent = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   optionsDialog.showModal();
-  try {
-    const [catalog, settings] = await Promise.all([
-      client.request<{ models: ModelChoice[] }>('/models'),
-      client.request<TurnOptions>(`/threads/${encodeURIComponent(id)}/settings`),
-    ]);
-    if (request !== dialogRequest || connection?.serverId !== serverId || selected?.id !== id) return;
-    modelChoices = catalog.models;
-    populateParameters(optionsModel, optionsThinking, modelChoices, turnOptions, '沿用会话设置');
-    optionsModel.disabled = false;
+  // Loaded sessions already provide these settings in their live snapshot
+  if (!hasLiveSettings) void optionsClient.request<TurnOptions>(`/threads/${encodeURIComponent(id)}/settings`).then(settings => {
+    if (!current() || (runtimeStatus !== null && liveModel && liveThinking)) return;
     element('options-current').textContent = settings.model ? `当前会话使用 ${settings.model}${settings.thinking ? ` · ${settings.thinking}` : ''}` : '当前会话沿用 Codex 默认设置';
+  }).catch(error => {
+    if (current() && !(runtimeStatus !== null && liveModel && liveThinking)) element('options-current').textContent = `当前会话参数读取失败。${errorText(error)}`;
+  });
+  try {
+    const models = await optionsClient.loadModels();
+    if (!current()) return;
+    const options = modelChoices.length ? selectedParameters(optionsModel, optionsThinking) : turnOptions;
+    modelChoices = models;
+    populateParameters(optionsModel, optionsThinking, modelChoices, options, '沿用会话设置');
+    optionsModel.disabled = false;
     element<HTMLButtonElement>('save-options').disabled = false;
   } catch (error) {
-    if (request === dialogRequest) showFormError('options-error', errorText(error));
+    if (current()) showFormError('options-error', errorText(error));
+  } finally {
+    if (current()) element('options-catalog-status').hidden = true;
   }
 }
 
@@ -1223,20 +1385,7 @@ element('resolve-create').addEventListener('click', () => {
 });
 element('parameters-button').addEventListener('click', () => void openParameters());
 element('skills-button').addEventListener('click', () => void openSkills());
-element('chat-actions-button').addEventListener('click', () => {
-  if (!client || !selected) return;
-  const id = selected.id;
-  const actionClient = client;
-  openChatActions(actionClient, selected, storageKey('fork', id), {
-    onOpen: threadId => { if (client === actionClient) void openChat(threadId); },
-    onPinned: pinned => {
-      if (client !== actionClient) return;
-      const thread = threads.find(item => item.id === id);
-      if (thread) thread.pinned = pinned;
-      renderInbox();
-    },
-  });
-});
+element('chat-pin-button').addEventListener('click', () => { if (selected) void togglePin(selected.id); });
 element('files-button').addEventListener('click', () => {
   if (!client || !selected || pending) return;
   const id = selected.id;
@@ -1337,7 +1486,7 @@ element('more-threads').addEventListener('click', async () => {
     const page = await client.request<{ threads: Thread[]; nextCursor: string | null }>(`/threads?cursor=${encodeURIComponent(nextThreads)}`);
     if (token !== generation) return;
     const existing = new Set(threads.map(thread => thread.id));
-    threads.push(...page.threads.filter(thread => !existing.has(thread.id)));
+    threads.push(...page.threads.filter(thread => !existing.has(thread.id)).map(thread => ({ ...thread, pinned: Boolean(thread.pinned) })));
     nextThreads = page.nextCursor;
     renderInbox();
   } catch (error) { if (token === generation) inform(errorText(error)); }
@@ -1366,7 +1515,7 @@ messageInput.addEventListener('input', () => {
   messageInput.style.height = 'auto';
   messageInput.style.height = `${Math.min(160, messageInput.scrollHeight)}px`;
   sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-    || (!messageInput.value.trim() && !selectedFiles.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
+    || (!messageInput.value.trim() && !selectedFiles.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));

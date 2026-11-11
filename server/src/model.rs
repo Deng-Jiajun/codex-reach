@@ -33,6 +33,8 @@ pub struct Message {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub question_replies: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub response_annotations: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
 }
 
@@ -65,6 +67,14 @@ pub fn status(value: &Value) -> String {
         .or_else(|| value["type"].as_str())
         .unwrap_or("unknown")
         .to_owned()
+}
+
+// Desktop list sources currently return both Unix seconds and milliseconds
+pub fn timestamp_seconds(value: &Value) -> Value {
+    match value.as_f64() {
+        Some(timestamp) if timestamp >= 100_000_000_000.0 => json!(timestamp / 1000.0),
+        _ => value.clone(),
+    }
 }
 
 fn output_text(value: &Value) -> String {
@@ -177,11 +187,15 @@ fn message(item: &Value) -> Option<Message> {
         "fileChange" => ("tool", "文件变更".to_owned()),
         _ => return None,
     };
+    let annotations = (role == "user")
+        .then(|| response_annotations(&body))
+        .flatten();
     let (body, mut attachments) = if role == "user" {
         user_text(&body)
     } else {
         (body, Vec::new())
     };
+    let (body, response_annotations) = annotations.unwrap_or((body, Vec::new()));
     for image in image_attachments {
         let existing = attachments.iter_mut().find(|attachment| {
             image.path.as_ref().is_some_and(|path| {
@@ -211,7 +225,11 @@ fn message(item: &Value) -> Option<Message> {
     } else {
         Vec::new()
     };
-    if body.is_empty() && questions.is_empty() && attachments.is_empty() {
+    if body.is_empty()
+        && questions.is_empty()
+        && attachments.is_empty()
+        && response_annotations.is_empty()
+    {
         return None;
     }
     Some(Message {
@@ -221,8 +239,37 @@ fn message(item: &Value) -> Option<Message> {
         phase: item["phase"].as_str().map(str::to_owned),
         questions,
         question_replies,
+        response_annotations,
         attachments,
     })
+}
+
+fn response_annotations(text: &str) -> Option<(String, Vec<Value>)> {
+    let text = text.trim_start();
+    if !text.starts_with("# Response annotations:\n")
+        && !text.starts_with("# Files mentioned by the user:\n")
+    {
+        return None;
+    }
+    let context = text.split_once("# Response annotations:\n")?.1;
+    let (_, encoded) = context.split_once("\n<response-annotations>\n")?;
+    let (encoded, request) = encoded.split_once("\n</response-annotations>\n")?;
+    let annotations: Vec<Value> = serde_json::from_str(encoded).ok()?;
+    if annotations
+        .iter()
+        .any(|item| item["text"].as_str().is_none() || item["annotation"].as_str().is_none())
+    {
+        return None;
+    }
+    let request = request
+        .trim_start()
+        .strip_prefix("## My request:\n")
+        .or_else(|| {
+            request
+                .trim_start()
+                .strip_prefix("## My request for Codex:\n")
+        })?;
+    Some((request.to_owned(), annotations))
 }
 
 fn user_text(text: &str) -> (String, Vec<MessageAttachment>) {
@@ -567,7 +614,9 @@ pub fn stream_view(state: &Value) -> Value {
         "complete": complete && !truncated,
         "status": status(&state["threadRuntimeStatus"]),
         "activeTurnId": active_turn_id,
-        "model": state["latestModel"],
+        "model": state["latestCollaborationMode"]["settings"]["model"]
+            .as_str().map(Value::from).unwrap_or_else(|| state["latestModel"].clone()),
+        "thinking": state["latestReasoningEffort"],
         "title": state["title"],
         "waiting": !requests.is_empty(),
         "requests":requests,
@@ -578,6 +627,76 @@ pub fn stream_view(state: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_annotations_preserve_source_and_keep_request_and_files_separate() {
+        let annotations = json!([{"text":"选段🙂","annotation":"核查这一段",
+            "source":{"messageId":"answer","startOffset":2,"endOffset":6}}]);
+        let context = format!(
+            "\n# Response annotations:\nSelection context\n<response-annotations>\n{annotations}\n</response-annotations>\n\n## My request:\n我的问题\n"
+        );
+        for input in [
+            context.clone(),
+            format!(
+                "\n# Files mentioned by the user:\n\n## example.txt: D:/example.txt\n\n## My request:\n{context}"
+            ),
+        ] {
+            let rendered = message(
+                &json!({"type":"userMessage","id":"user","content":[{"type":"text","text":input}]}),
+            )
+            .unwrap();
+            assert_eq!(rendered.text, "我的问题\n");
+            assert_eq!(json!(rendered.response_annotations), annotations);
+            assert_eq!(
+                rendered.attachments.len(),
+                usize::from(input.contains("# Files mentioned"))
+            );
+        }
+        let native = format!(
+            "\n# Files mentioned by the user:\n\n## example.txt: D:/example.txt\n{context}"
+        );
+        let rendered = message(
+            &json!({"type":"userMessage","id":"native","content":[{"type":"text","text":native}]}),
+        )
+        .unwrap();
+        assert_eq!(rendered.text, "我的问题\n");
+        assert_eq!(rendered.response_annotations.len(), 1);
+        assert_eq!(rendered.attachments.len(), 1);
+        let annotation_only = context.strip_suffix("我的问题\n").unwrap();
+        let rendered = message(&json!({"type":"userMessage","id":"annotation-only","content":[{"type":"text","text":annotation_only}]})).unwrap();
+        assert!(rendered.text.is_empty());
+        assert_eq!(rendered.response_annotations.len(), 1);
+        let literal = "正文中的示例\n# Response annotations:\n<response-annotations>\n[]\n</response-annotations>\n\n## My request:\n示例内容";
+        assert!(response_annotations(literal).is_none());
+        assert!(response_annotations("# Response annotations:\n<response-annotations>\ninvalid\n</response-annotations>\n\n## My request:\n正文").is_none());
+    }
+
+    #[test]
+    fn live_view_includes_session_model_and_reasoning_effort() {
+        let view =
+            stream_view(&json!({"latestModel":"example-model","latestReasoningEffort":"xhigh"}));
+        assert_eq!(view["model"], "example-model");
+        assert_eq!(view["thinking"], "xhigh");
+        let selected = stream_view(&json!({"latestModel":"previous-model",
+            "latestCollaborationMode":{"settings":{"model":"selected-model"}},
+            "latestReasoningEffort":"high"}));
+        assert_eq!(selected["model"], "selected-model");
+        assert_eq!(selected["thinking"], "high");
+    }
+
+    #[test]
+    fn desktop_list_timestamps_accept_seconds_and_milliseconds() {
+        assert_eq!(timestamp_seconds(&json!(1793449439)), json!(1793449439));
+        assert_eq!(
+            timestamp_seconds(&json!(1793449439000i64)),
+            json!(1793449439.0)
+        );
+        assert_eq!(
+            timestamp_seconds(&json!(1793449439123i64)),
+            json!(1793449439.123)
+        );
+        assert_eq!(timestamp_seconds(&Value::Null), Value::Null);
+    }
 
     #[test]
     fn follows_canonical_order_and_only_exposes_reasoning_summary() {

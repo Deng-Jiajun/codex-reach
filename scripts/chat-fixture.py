@@ -149,15 +149,19 @@ organization_files = {
 
 def initial_organization_state():
     return {
-        "receipts": {}, "pinRequests": [], "forkRequests": [], "forkPosts": 0, "forkCreateCount": 0,
+        "receipts": {}, "pinRequests": [],
         "fileQueries": [], "resolveRequests": [], "uploadRequests": [], "previewRequests": [],
         "uploadedFiles": {}, "uploadedData": {}, "messageRequests": [], "sendPosts": 0, "sendCount": 0,
-        "pendingFork": None, "awaitingMessages": [], "pinned": {},
+        "awaitingMessages": [], "pinned": {},
         "threads": {"fixture-organization": {
             "id": "fixture-organization", "title": "组织与附件验证", "cwd": "C:/Example", "revision": 1,
             "turns": [{"id": "organization-history", "status": "completed", "messages": [
                 {"id": "organization-user", "kind": "user", "text": "ORGANIZATION_USER", "phase": None,
                     "attachments": [organization_files["C:/Example/history.png"]]},
+                {"id": "organization-progress", "kind": "assistant", "text": "正在核对配置与执行顺序。", "phase": "commentary"},
+                {"id": "organization-reasoning", "kind": "reasoning", "text": "核实入口与调用顺序。", "phase": None},
+                {"id": "organization-command", "kind": "tool", "text": "rg -n pattern example.cpp\n找到对应处理分支", "phase": None},
+                {"id": "organization-command-2", "kind": "tool", "text": "查看相关函数实现", "phase": None},
                 {"id": "organization-answer", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n第二行可引用", "phase": "final_answer"},
             ]}],
         }},
@@ -185,26 +189,16 @@ def organization_listing(path):
     return {"path": path, "parent": parent, "entries": entries}
 
 
-def release_organization_fork():
-    request_id = organization_state["pendingFork"]
-    if request_id is None:
-        return
-    child = copy.deepcopy(organization_state["threads"]["fixture-organization"])
-    child["id"] = "fixture-organization-child"
-    child["title"] = "组织分支验证"
-    organization_state["threads"][child["id"]] = child
-    organization_state["forkCreateCount"] += 1
-    organization_state["receipts"][request_id].update({"status": "accepted", "result": {
-        "threadId": child["id"], "synchronization": {"status": "complete"},
-    }})
-    organization_state["pendingFork"] = None
-
-
 def release_organization_messages():
     for request in organization_state["awaitingMessages"]:
         chat = organization_state["threads"][request["chatId"]]
+        prompt = request["prompt"]
+        annotations = []
+        if prompt.startswith("\n# Response annotations:\n"):
+            annotations = json.loads(prompt.split("<response-annotations>\n", 1)[1].split("\n</response-annotations>", 1)[0])
+            prompt = prompt.split("\n## My request:\n", 1)[1]
         chat["turns"].append({"id": "organization-send-" + request["requestId"], "status": "completed", "messages": [
-            {"id": "organization-sent-user-" + request["requestId"], "kind": "user", "text": request["prompt"], "phase": None,
+            {"id": "organization-sent-user-" + request["requestId"], "kind": "user", "text": prompt, "phase": None, "responseAnnotations": annotations,
                 "attachments": copy.deepcopy(request.get("attachments", []))},
             {"id": "organization-sent-assistant-" + request["requestId"], "kind": "assistant", "text": "ORGANIZATION_ATTACHMENTS_OK", "phase": "final_answer"},
         ]})
@@ -303,7 +297,7 @@ class Handler(BaseHTTPRequestHandler):
         if url.path == "/control/organization-stats":
             with condition:
                 self.reply({key: organization_state[key] for key in [
-                    "pinRequests", "forkRequests", "forkPosts", "forkCreateCount", "fileQueries", "resolveRequests",
+                    "pinRequests", "fileQueries", "resolveRequests",
                     "uploadRequests", "previewRequests", "messageRequests", "sendPosts", "sendCount",
                 ]})
             return
@@ -348,14 +342,14 @@ class Handler(BaseHTTPRequestHandler):
                 chat_id = url.path.split("/")[3]
                 chat = organization_state["threads"].get(chat_id)
                 if chat is None:
-                    self.reply({"error": "合成分支尚未创建"}, 404)
+                    self.reply({"error": "合成对话不存在"}, 404)
                     return
                 if url.path.endswith("/live"):
                     if parse_qs(url.query).get("after", [None])[0] == str(chat["revision"]):
                         condition.wait(timeout=0.4)
                     result = {"available": True, "revision": str(chat["revision"]), "turns": chat["turns"],
                         "complete": True, "status": "idle", "activeTurnId": None, "requests": [], "waiting": False,
-                        "editableTurn": None, "model": "fixture-standard"}
+                        "editableTurn": None, "model": "fixture-standard", "thinking": "low"}
                 else:
                     result = {"id": chat_id, "title": chat["title"], "cwd": chat["cwd"], "status": "idle",
                         "turns": chat["turns"], "nextCursor": None, "hasMore": False}
@@ -365,7 +359,7 @@ class Handler(BaseHTTPRequestHandler):
                         condition.wait(timeout=0.4)
                     result = {"available": True, "revision": str(interaction_state["revision"]),
                         "turns": interaction_state["turns"], "complete": True, "status": "idle",
-                        "activeTurnId": None, "model": "fixture-standard", "requests": interaction_state["pending"],
+                        "activeTurnId": None, "model": "fixture-standard", "thinking": "low", "requests": interaction_state["pending"],
                         "waiting": any(not request.get("completed") for request in interaction_state["pending"]),
                         "editableTurn": interaction_state["editableTurn"]}
                 else:
@@ -393,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
                 if parse_qs(url.query).get("after", [None])[0] == str(task_state["loadingRevision"]):
                     condition.wait(timeout=0.3)
                 result = {"available": True, "revision": str(task_state["loadingRevision"]), "turns": [loading_turn()],
-                    "complete": False, "status": "idle", "activeTurnId": None, "model": "fixture-standard", "waiting": False}
+                    "complete": False, "status": "idle", "activeTurnId": None, "model": "fixture-standard", "thinking": "low", "waiting": False}
             elif url.path in ("/api/threads/fixture-task/history", "/api/threads/fixture-task/live"):
                 task = task_state["task"]
                 if not task:
@@ -406,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
                     while task_state["holdTaskLive"] and time.monotonic() < deadline:
                         condition.wait(timeout=deadline-time.monotonic())
                     result = {"available": True, "revision": str(task["revision"]), "turns": task["turns"], "complete": True,
-                        "status": task["status"], "activeTurnId": task["activeTurnId"], "model": task["model"], "waiting": False}
+                        "status": task["status"], "activeTurnId": task["activeTurnId"], "model": task["model"], "thinking": task["thinking"], "waiting": False}
                 else:
                     result = {"id": "fixture-task", "title": "任务创建验证", "cwd": "C:\\Example", "status": task["status"],
                         "turns": task["turns"], "nextCursor": None, "hasMore": False}
@@ -426,7 +420,7 @@ class Handler(BaseHTTPRequestHandler):
                 if after == str(state["revision"]):
                     condition.wait(timeout=2)
                 result = {"available": True, "revision": str(state["revision"]), "turns": state["turns"], "complete": True, "status": state["status"],
-                    "activeTurnId": state["turns"][-1]["id"] if state["status"] == "active" else None, "model": "fixture-standard", "waiting": False}
+                    "activeTurnId": state["turns"][-1]["id"] if state["status"] == "active" else None, "model": "fixture-standard", "thinking": "low", "waiting": False}
             elif url.path.startswith("/api/requests/"):
                 request_id = url.path.rsplit("/", 1)[1]
                 result = state["requests"].get(request_id) or task_state["requests"].get(request_id) or interaction_state["receipts"].get(request_id) or organization_state["receipts"].get(request_id)
@@ -439,14 +433,12 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
-        if self.path in ("/control/organization-reset", "/control/release-organization-fork", "/control/release-organization-message"):
+        if self.path in ("/control/organization-reset", "/control/release-organization-message"):
             with condition:
                 if self.path == "/control/organization-reset":
                     organization_state.clear()
                     organization_state.update(initial_organization_state())
                     state["online"] = True
-                elif self.path == "/control/release-organization-fork":
-                    release_organization_fork()
                 else:
                     release_organization_messages()
                 condition.notify_all()
@@ -568,7 +560,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     self.reply({"error": "Unknown fixture endpoint"}, 404)
             return
-        if self.path.startswith("/api/threads/fixture-organization") and self.path.endswith(("/pin", "/fork", "/messages")):
+        if self.path.startswith("/api/threads/fixture-organization") and self.path.endswith(("/pin", "/messages")):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             chat_id = self.path.split("/")[3]
             operation = self.path.rsplit("/", 1)[1]
@@ -579,17 +571,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.reply({"pinned": request["pinned"]})
                     return
                 request_id = request["requestId"]
-                organization_state["forkPosts" if operation == "fork" else "sendPosts"] += 1
+                organization_state["sendPosts"] += 1
                 receipt = organization_state["receipts"].get(request_id)
                 if receipt is None:
-                    if operation == "fork":
-                        organization_state["forkRequests"].append({"chatId": chat_id, **request})
-                        organization_state["pendingFork"] = request_id
-                    else:
-                        message = {"chatId": chat_id, **request}
-                        organization_state["messageRequests"].append(message)
-                        organization_state["awaitingMessages"].append(message)
-                        organization_state["sendCount"] += 1
+                    message = {"chatId": chat_id, **request}
+                    organization_state["messageRequests"].append(message)
+                    organization_state["awaitingMessages"].append(message)
+                    organization_state["sendCount"] += 1
                     receipt = {"requestId": request_id, "chatId": chat_id, "status": "sending", "error": None, "result": None}
                     organization_state["receipts"][request_id] = receipt
                 self.reply(receipt, 202)

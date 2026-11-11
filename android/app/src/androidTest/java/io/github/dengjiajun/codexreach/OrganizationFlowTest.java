@@ -25,7 +25,7 @@ import org.junit.runner.RunWith;
 @RunWith(AndroidJUnit4.class)
 public class OrganizationFlowTest {
     private static final String SOURCE_ID = "fixture-organization";
-    private static final String QUOTED_DRAFT = "原有手机草稿\n\n引用自对话「组织与附件验证」\n对话 ID fixture-organization，消息 ID organization-answer\n\n> 仅引用这一段\n\n";
+    private static final String QUOTED_DRAFT = "原有手机草稿";
     private static final String SYNTHETIC_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGOQS9nyHwAEEAI26XT+MQAAAABJRU5ErkJggg==";
 
     @Test
@@ -39,7 +39,8 @@ public class OrganizationFlowTest {
             connectIfNeeded(webView);
             if (stage.equals("organization")) {
                 openThread(webView, SOURCE_ID, "组织与附件验证");
-                verifyPinAndFork(webView);
+                verifyProcessGroup(webView);
+                verifyPin(webView);
                 verifyQuoteAndAttachments(webView);
             } else {
                 assertEquals("organization-persist", stage);
@@ -71,49 +72,47 @@ public class OrganizationFlowTest {
         String row = "document.querySelector('[data-thread-id=\"" + id + "\"]')";
         await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled && Boolean(" + row + ")");
         evaluate(webView, row + ".click(); null");
-        await(webView, "!document.querySelector('#chat-view').hidden && document.querySelector('#chat-title').textContent===" + JSONObject.quote(title) + " && document.querySelector('#messages').textContent.includes('QUOTE_SOURCE_LINE') && document.querySelector('#chat-state').textContent==='空闲'");
+        await(webView, "!document.querySelector('#chat-view').hidden && document.querySelector('#chat-title').textContent===" + JSONObject.quote(title) + " && document.querySelector('#messages').textContent.includes('QUOTE_SOURCE_LINE') && document.querySelector('#chat-state').dataset.status==='idle' && document.querySelector('#chat-state').hidden");
     }
 
-    private void openActions(WebView webView) throws Exception {
-        evaluate(webView, "document.querySelector('#chat-actions-button').click(); null");
-        await(webView, "document.querySelector('#chat-actions-dialog')?.open && !document.querySelector('#chat-actions-dialog [data-pin]').disabled");
+    private void verifyProcessGroup(WebView webView) throws Exception {
+        assertEquals("true", evaluate(webView, "document.querySelectorAll('.turn-process').length===1 && !document.querySelector('.turn-process').open"));
+        assertEquals("true", evaluate(webView, "!document.querySelector('[data-message-id=\"organization-answer\"]').closest('.turn-process')"));
+        evaluate(webView, "document.querySelector('.turn-process > summary').click(); null");
+        assertEquals("true", evaluate(webView, "document.querySelector('.turn-process').open && document.querySelector('.turn-process [data-message-id=\"organization-progress\"]')!==null"));
+        evaluate(webView, "document.querySelector('.turn-process > summary').click(); null");
     }
 
-    private void verifyPinAndFork(WebView webView) throws Exception {
-        openActions(webView);
-        assertEquals("true", evaluate(webView, "document.querySelector('#chat-actions-dialog [data-pin]').textContent==='置顶对话'"));
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-pin]').click(); document.querySelector('#chat-actions-dialog [data-pin]').click(); null");
-        await(webView, "!document.querySelector('#chat-actions-dialog [data-pin]').disabled && document.querySelector('#chat-actions-dialog [data-pin]').textContent==='取消置顶'");
-        assertEquals("true", evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-organization\"] .thread-meta').textContent.includes('置顶')"));
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-pin]').click(); null");
-        await(webView, "!document.querySelector('#chat-actions-dialog [data-pin]').disabled && document.querySelector('#chat-actions-dialog [data-pin]').textContent==='置顶对话'");
+    private void verifyPin(WebView webView) throws Exception {
+        String pin = "document.querySelector('#chat-pin-button')";
+        assertEquals("true", evaluate(webView, pin + ".getAttribute('aria-pressed')==='false'"));
+        evaluate(webView, pin + ".click(); " + pin + ".click(); null");
+        await(webView, "!" + pin + ".disabled && " + pin + ".getAttribute('aria-pressed')==='true'");
+        evaluate(webView, "document.querySelector('#back-button').click(); null");
+        String listPin = "document.querySelector('[data-pin-id=\"fixture-organization\"]')";
+        await(webView, "!document.querySelector('#refresh-button').disabled && " + listPin + ".getAttribute('aria-pressed')==='true'");
+        evaluate(webView, listPin + ".click(); null");
+        await(webView, "!" + listPin + ".disabled && " + listPin + ".getAttribute('aria-pressed')==='false'");
+        assertEquals("false", evaluate(webView, "document.querySelector('#inbox-view').hidden"));
         JSONArray pins = stats().getJSONArray("pinRequests");
         assertEquals(2, pins.length());
         assertTrue(pins.getJSONObject(0).getBoolean("pinned"));
         assertEquals(false, pins.getJSONObject(1).getBoolean("pinned"));
-        assertEquals("false", evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-organization\"] .thread-meta').textContent.includes('置顶')"));
-
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-fork]').click(); document.querySelector('#chat-actions-dialog [data-fork]').click(); null");
-        awaitCount("forkRequests", 1);
-        assertEquals("true", evaluate(webView, "document.querySelector('#chat-actions-dialog [data-fork]').disabled && document.querySelector('#chat-actions-dialog [data-open]').hidden"));
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-back]').click(); null");
-        openActions(webView);
-        assertEquals("true", evaluate(webView, "document.querySelector('#chat-actions-dialog [data-fork]').disabled"));
-        assertEquals(1, stats().getInt("forkPosts"));
-        control("release-organization-fork");
-        await(webView, "!document.querySelector('#chat-actions-dialog [data-open]').hidden && document.querySelector('#chat-actions-dialog [data-status]').textContent==='完整历史分支已创建。'");
-        assertEquals(1, stats().getInt("forkCreateCount"));
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-back]').click(); null");
+        openThread(webView, SOURCE_ID, "组织与附件验证");
+        assertEquals("true", evaluate(webView, pin + ".getAttribute('aria-pressed')==='false'"));
+        assertEquals("true", evaluate(webView, "!document.querySelector('#chat-actions-button') && !document.body.textContent.includes('创建完整历史分支')"));
     }
 
     private void verifyQuoteAndAttachments(WebView webView) throws Exception {
         setComposer(webView, "原有手机草稿");
         evaluate(webView, "document.querySelector('[data-message-id=\"organization-answer\"] .quote-message').click(); null");
-        await(webView, "document.querySelector('#quote-dialog')?.open");
-        assertEquals("true", evaluate(webView, "document.querySelector('#quote-dialog [data-quote]').value.includes('QUOTE_SOURCE_LINE') && document.querySelector('#message-input').value==='原有手机草稿'"));
-        evaluate(webView, "document.querySelector('#quote-dialog [data-quote]').value='仅引用这一段'; document.querySelector('#quote-dialog [data-add]').click(); null");
-        await(webView, "!document.querySelector('#quote-dialog')");
+        await(webView, "document.querySelector('#annotation-dialog')?.open");
+        assertEquals("true", evaluate(webView, "document.querySelector('#annotation-dialog [data-source-text]').readOnly && document.querySelector('#annotation-dialog [data-add]').disabled && document.querySelector('#message-input').value==='原有手机草稿'"));
+        evaluate(webView, "(()=>{const source=document.querySelector('#annotation-dialog [data-source-text]'); source.setSelectionRange(0,17); source.dispatchEvent(new Event('select')); document.querySelector('#annotation-dialog [data-comment]').value='只针对这一段核查'; document.querySelector('#annotation-dialog [data-add]').click()})(); null");
+        await(webView, "!document.querySelector('#annotation-dialog') && document.querySelectorAll('#selected-annotations .annotation-card').length===1");
+        assertEquals("true", evaluate(webView, "document.querySelector('#selected-annotations').textContent.includes('QUOTE_SOURCE_LINE') && document.querySelector('#selected-annotations').textContent.includes('只针对这一段核查')"));
         assertComposer(webView, QUOTED_DRAFT);
+        assertEquals("true", evaluate(webView, "document.querySelectorAll('#selected-annotations .annotation-card').length===1"));
         assertEquals(0, stats().getInt("sendPosts"));
 
         evaluate(webView, "document.querySelector('[data-message-id=\"organization-user\"] .attachment-image-button').click(); null");
@@ -161,30 +160,24 @@ public class OrganizationFlowTest {
     }
 
     private void verifyPersistedDraftAndSend(WebView webView) throws Exception {
-        await(webView, "document.querySelector('#chat-title').textContent==='组织与附件验证' && document.querySelectorAll('#selected-files .attachment-chip').length===4 && document.querySelector('#chat-state').textContent==='空闲'");
+        await(webView, "document.querySelector('#chat-title').textContent==='组织与附件验证' && document.querySelectorAll('#selected-files .attachment-chip').length===4 && document.querySelector('#chat-state').dataset.status==='idle' && document.querySelector('#chat-state').hidden");
         assertComposer(webView, QUOTED_DRAFT);
+        assertEquals("true", evaluate(webView, "document.querySelectorAll('#selected-annotations .annotation-card').length===1 && document.querySelector('#selected-annotations').textContent.includes('只针对这一段核查')"));
         for (String name : new String[] {"desktop.txt", "docs", "photo.png", "mobile.png"}) {
             assertEquals("true", evaluate(webView, "[...document.querySelectorAll('#selected-files .attachment-name,#selected-files .attachment-image-button')].some(node=>node.textContent===" + JSONObject.quote(name) + ")"));
         }
-        openActions(webView);
-        assertEquals("true", evaluate(webView, "document.querySelector('#chat-actions-dialog [data-fork]').disabled && !document.querySelector('#chat-actions-dialog [data-open]').hidden"));
-        assertEquals(1, stats().getInt("forkPosts"));
-        assertEquals(1, stats().getInt("forkCreateCount"));
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-open]').click(); null");
-        await(webView, "document.querySelector('#chat-title').textContent==='组织分支验证' && document.querySelector('#messages').textContent.includes('ORGANIZATION_USER') && document.querySelector('#messages').textContent.includes('QUOTE_SOURCE_LINE')");
-        assertEquals("true", evaluate(webView, "Boolean(document.querySelector('[data-message-id=\"organization-user\"] .attachment-image-button'))"));
-        openThread(webView, SOURCE_ID, "组织与附件验证");
-        await(webView, "document.querySelectorAll('#selected-files .attachment-chip').length===4");
-        assertComposer(webView, QUOTED_DRAFT);
-        openActions(webView);
-        assertEquals("true", evaluate(webView, "!document.querySelector('#chat-actions-dialog [data-fork]').disabled && document.querySelector('#chat-actions-dialog [data-open]').hidden"));
-        evaluate(webView, "document.querySelector('#chat-actions-dialog [data-back]').click(); null");
-
         evaluate(webView, "document.querySelector('#message-form').requestSubmit(); document.querySelector('#message-form').requestSubmit(); null");
         awaitCount("messageRequests", 1);
         await(webView, "!document.querySelector('#delivery-note').hidden && document.querySelectorAll('#selected-files .attachment-chip').length===4");
         JSONObject sent = stats().getJSONArray("messageRequests").getJSONObject(0);
-        assertEquals(QUOTED_DRAFT, sent.getString("prompt"));
+        String prompt = sent.getString("prompt");
+        assertTrue(prompt.endsWith("## My request:\n" + QUOTED_DRAFT));
+        JSONObject annotation = new JSONArray(prompt.split("<response-annotations>\n", 2)[1].split("\n</response-annotations>", 2)[0]).getJSONObject(0);
+        assertEquals("QUOTE_SOURCE_LINE", annotation.getString("text"));
+        assertEquals("只针对这一段核查", annotation.getString("annotation"));
+        assertEquals("organization-answer", annotation.getJSONObject("source").getString("messageId"));
+        assertEquals(0, annotation.getJSONObject("source").getInt("startOffset"));
+        assertEquals(17, annotation.getJSONObject("source").getInt("endOffset"));
         JSONArray attachments = sent.getJSONArray("attachments");
         assertEquals(4, attachments.length());
         assertAttachment(attachments.getJSONObject(0), "C:/Example/desktop.txt", false, false);
@@ -195,6 +188,7 @@ public class OrganizationFlowTest {
         control("release-organization-message");
         await(webView, "document.querySelector('#delivery-note').hidden && document.querySelector('#selected-files').hidden && document.querySelector('#messages').textContent.includes('ORGANIZATION_ATTACHMENTS_OK')");
         assertComposer(webView, "附件发送期间的新草稿");
+        assertEquals("true", evaluate(webView, "document.querySelector('#selected-annotations').hidden && document.querySelectorAll('#messages article.user .annotation-card').length===1 && !document.querySelector('#messages').textContent.includes('<response-annotations>')"));
         assertEquals("true", evaluate(webView, "[...document.querySelectorAll('#messages article.user')].at(-1).querySelectorAll('.attachment-chip').length===4"));
         assertEquals(1, stats().getInt("sendPosts"));
         assertEquals(1, stats().getInt("sendCount"));
@@ -215,8 +209,6 @@ public class OrganizationFlowTest {
         assertComposer(webView, "最终保留草稿");
         assertEquals(2, stats().getInt("sendPosts"));
         assertEquals(2, stats().getInt("sendCount"));
-        assertEquals(1, stats().getInt("forkPosts"));
-        assertEquals(1, stats().getInt("forkCreateCount"));
         assertEquals(1, stats().getJSONArray("uploadRequests").length());
     }
 

@@ -524,52 +524,6 @@ async fn pin_thread(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ForkRequest {
-    request_id: String,
-}
-
-async fn fork_thread(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(input): Json<ForkRequest>,
-) -> Result<(StatusCode, Json<Receipt>), ApiError> {
-    if Uuid::parse_str(&input.request_id).is_err() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "分支请求需要有效操作标识".to_owned(),
-        ));
-    }
-    let (receipt, fresh) = state
-        .outbox
-        .reserve(&input.request_id, "fork", &id, "", &json!({}))
-        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
-    if fresh {
-        tokio::spawn(async move {
-            let result = async {
-                let result = state
-                    .tools
-                    .call(
-                        "fork_thread",
-                        json!({"threadId":id,"environment":{"type":"same-directory"}}),
-                    )
-                    .await?;
-                ensure!(
-                    result["threadId"].as_str().is_some_and(|id| !id.is_empty()),
-                    "尚未取得分支会话标识，请核对会话列表"
-                );
-                Ok(result)
-            }
-            .await;
-            if state.outbox.finish(&input.request_id, result).is_err() {
-                eprintln!("无法保存分支会话的结果，请检查本地操作数据库");
-            }
-        });
-    }
-    Ok((StatusCode::ACCEPTED, Json(receipt)))
-}
-
-#[derive(Deserialize)]
 struct FileQuery {
     path: Option<String>,
 }
@@ -660,7 +614,7 @@ async fn threads(
         .filter(|thread| !pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())))
         .filter(|thread| thread["kind"] == "codex" && thread["hostId"] == "local")
         .map(|thread| json!({"id":thread["id"],"title":model::text(thread, "title"),"projectId":thread["projectId"],
-            "cwd":thread["cwd"],"status":model::status(&thread["status"]),"updatedAt":thread["updatedAt"],
+            "cwd":thread["cwd"],"status":model::status(&thread["status"]),"updatedAt":model::timestamp_seconds(&thread["updatedAt"]),
             "pinned":pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())})).collect::<Vec<_>>();
     Ok(Json(
         json!({"threads":threads,"nextCursor":result["nextCursor"]}),
@@ -877,7 +831,6 @@ async fn main() -> Result<()> {
         .route("/threads/{id}/skills", get(skills))
         .route("/threads/{id}/open", post(open_thread))
         .route("/threads/{id}/pin", get(pin_state).post(pin_thread))
-        .route("/threads/{id}/fork", post(fork_thread))
         .route("/threads/{id}/stop", post(stop_thread))
         .route("/threads/{id}/respond", post(respond))
         .route("/threads/{id}/edit", post(edit))

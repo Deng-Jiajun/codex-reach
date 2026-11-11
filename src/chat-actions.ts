@@ -1,138 +1,105 @@
-import { ReachClient, ReachError } from './api';
-import type { HistoryPage, Receipt } from './types';
+import type { ResponseAnnotation } from './types';
 
-type ForkOperation = { requestId: string; status: string; error?: string; result?: Receipt['result'] };
+export type TextSelection = { startOffset: number; endOffset: number };
 
-export function openChatActions(client: ReachClient, chat: HistoryPage, storageKey: string, callbacks: {
-  onOpen: (threadId: string) => void;
-  onPinned: (pinned: boolean) => void;
-}): void {
-  const dialog = document.createElement('dialog');
-  dialog.className = 'task-dialog';
-  dialog.id = 'chat-actions-dialog';
-  dialog.innerHTML = `<div class="dialog-header"><button class="quiet" type="button" data-back>返回</button><h2>对话操作</h2></div>
-    <button class="quiet" type="button" data-pin disabled>正在读取置顶状态…</button>
-    <hr><p class="field-note">分支会复制当前完整历史，使用相同工作目录。原对话正在执行时，也会包含当前轮次已有内容。</p>
-    <button class="primary" type="button" data-fork>创建完整历史分支</button>
-    <p class="field-note" role="status" data-status hidden></p>
-    <button class="quiet" type="button" data-query hidden>重新查询结果</button>
-    <button class="quiet" type="button" data-open hidden>打开已创建的分支</button>
-    <button class="quiet" type="button" data-reset hidden>已核对会话列表，恢复操作</button>`;
-  const pin = dialog.querySelector<HTMLButtonElement>('[data-pin]')!;
-  const fork = dialog.querySelector<HTMLButtonElement>('[data-fork]')!;
-  const status = dialog.querySelector<HTMLParagraphElement>('[data-status]')!;
-  const query = dialog.querySelector<HTMLButtonElement>('[data-query]')!;
-  const open = dialog.querySelector<HTMLButtonElement>('[data-open]')!;
-  const reset = dialog.querySelector<HTMLButtonElement>('[data-reset]')!;
-  let operation: ForkOperation | null = null;
-  try { operation = JSON.parse(localStorage.getItem(storageKey) ?? 'null') as ForkOperation | null; } catch { /* Ignore an unreadable local record. */ }
-  let pinned = false;
-  let polling = false;
-
-  function render(): void {
-    fork.disabled = Boolean(operation);
-    fork.textContent = operation?.status === 'sending' ? '正在创建分支…' : '创建完整历史分支';
-    const childId = operation?.result?.threadId;
-    const synchronization = operation?.result?.synchronization;
-    status.hidden = !operation;
-    status.textContent = childId ? synchronization?.status === 'failed'
-      ? `分支已创建，历史同步失败。${synchronization.message ?? ''} 请打开分支核对。`
-      : '完整历史分支已创建。'
-      : operation?.error ?? '正在确认创建结果…';
-    query.hidden = !operation || operation.status !== 'sending' || !operation.error || polling;
-    open.hidden = !childId;
-    reset.hidden = operation?.status !== 'unknown';
-  }
-
-  function save(): void {
-    if (operation) localStorage.setItem(storageKey, JSON.stringify(operation));
-    else localStorage.removeItem(storageKey);
-    render();
-  }
-
-  async function poll(): Promise<void> {
-    if (polling || !operation || operation.status !== 'sending') return;
-    polling = true;
-    try {
-      while (dialog.open && operation?.status === 'sending') {
-        try {
-          const receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(operation.requestId)}`);
-          operation.status = receipt.status;
-          operation.error = receipt.error ?? undefined;
-          operation.result = receipt.result;
-          save();
-          if (receipt.status !== 'sending') return;
-        } catch (error) {
-          operation.error = `创建结果待确认。${error instanceof Error ? error.message : String(error)}`;
-          if (error instanceof ReachError && error.status === 404) operation.status = 'unknown';
-          save();
-          return;
-        }
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    } finally { polling = false; render(); }
-  }
-
-  dialog.querySelector('[data-back]')!.addEventListener('click', () => dialog.close());
-  dialog.addEventListener('close', () => dialog.remove(), { once: true });
-  pin.addEventListener('click', async () => {
-    pin.disabled = true;
-    try {
-      const result = await client.request<{ pinned: boolean }>(`/threads/${encodeURIComponent(chat.id)}/pin`, 'POST', { pinned: !pinned });
-      pinned = result.pinned;
-      callbacks.onPinned(pinned);
-      pin.textContent = pinned ? '取消置顶' : '置顶对话';
-    } catch (error) {
-      pin.textContent = `置顶状态未确认，点击重试。${error instanceof Error ? error.message : String(error)}`;
-    } finally { pin.disabled = false; }
-  });
-  fork.addEventListener('click', async () => {
-    if (operation) return;
-    operation = { requestId: crypto.randomUUID(), status: 'sending' };
-    save();
-    try { await client.request(`/threads/${encodeURIComponent(chat.id)}/fork`, 'POST', { requestId: operation.requestId }); }
-    catch (error) { operation.error = error instanceof Error ? error.message : String(error); save(); }
-    await poll();
-  });
-  query.addEventListener('click', () => void poll());
-  reset.addEventListener('click', () => { operation = null; save(); });
-  open.addEventListener('click', () => {
-    if (!operation?.result?.threadId) return;
-    const threadId = operation.result.threadId;
-    operation = null;
-    save();
-    dialog.close();
-    callbacks.onOpen(threadId);
-  });
-  document.body.append(dialog);
-  dialog.showModal();
-  render();
-  void client.request<{ pinned: boolean }>(`/threads/${encodeURIComponent(chat.id)}/pin`).then(result => {
-    pinned = result.pinned;
-    pin.textContent = pinned ? '取消置顶' : '置顶对话';
-    pin.disabled = false;
-  }).catch(error => { pin.textContent = `置顶状态读取失败。${error instanceof Error ? error.message : String(error)}`; });
-  void poll();
+export function selectedMessageText(content: HTMLElement): TextSelection | undefined {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount || selection.isCollapsed) return;
+  const range = selection.getRangeAt(0);
+  if (!content.contains(range.startContainer) || !content.contains(range.endContainer)) return;
+  const prefix = document.createRange();
+  prefix.selectNodeContents(content);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const startOffset = prefix.toString().length;
+  prefix.setEnd(range.endContainer, range.endOffset);
+  return { startOffset, endOffset: prefix.toString().length };
 }
 
-export function openQuote(text: string, chat: HistoryPage, messageId: string, onAdd: (quote: string) => void): void {
+export function annotationPrompt(prompt: string, annotations: ResponseAnnotation[]): string {
+  if (!annotations.length) return prompt;
+  return `\n# Response annotations:\nEach item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment.\n<response-annotations>\n${JSON.stringify(annotations)}\n</response-annotations>\n\n## My request:\n${prompt}`;
+}
+
+export function openAnnotation(text: string, messageId: string, selection: TextSelection | undefined,
+  comment: string, onAdd: (annotation: ResponseAnnotation) => void): void {
   const dialog = document.createElement('dialog');
-  dialog.className = 'task-dialog';
-  dialog.id = 'quote-dialog';
-  dialog.innerHTML = `<div class="dialog-header"><button class="quiet" type="button" data-back>返回</button><h2>引用消息</h2></div>
-    <label>引用内容<textarea rows="8" data-quote></textarea></label>
-    <p class="field-note" data-source></p><button class="primary" type="button" data-add>加入当前输入框</button>`;
-  const input = dialog.querySelector<HTMLTextAreaElement>('[data-quote]')!;
+  dialog.className = 'task-dialog annotation-dialog';
+  dialog.id = 'annotation-dialog';
+  dialog.innerHTML = `<div class="dialog-header"><button class="quiet" type="button" data-back>返回</button><h2>添加到对话</h2></div>
+    <details class="annotation-source"><summary>选择回答片段</summary><label>选中要讨论的文字<textarea rows="6" readonly data-source-text></textarea></label></details>
+    <blockquote class="annotation-excerpt" data-excerpt hidden></blockquote>
+    <label>你的意见<textarea rows="3" data-comment placeholder="对这段话有什么意见？（可选）"></textarea></label>
+    <button class="primary" type="button" data-add disabled>添加到对话</button>`;
+  const input = dialog.querySelector<HTMLTextAreaElement>('[data-source-text]')!;
+  const opinion = dialog.querySelector<HTMLTextAreaElement>('[data-comment]')!;
+  const excerpt = dialog.querySelector<HTMLElement>('[data-excerpt]')!;
+  const add = dialog.querySelector<HTMLButtonElement>('[data-add]')!;
+  const source = dialog.querySelector<HTMLDetailsElement>('.annotation-source')!;
   input.value = text;
-  dialog.querySelector('[data-source]')!.textContent = `来源对话「${chat.title || '未命名对话'}」`;
+  opinion.value = comment;
+  source.open = !selection;
+  let chosen = selection;
+  const update = () => {
+    const selectedText = chosen ? text.slice(chosen.startOffset, chosen.endOffset) : '';
+    excerpt.textContent = selectedText;
+    excerpt.hidden = !selectedText || source.open;
+    add.disabled = !selectedText.trim();
+  };
+  input.addEventListener('select', () => {
+    chosen = { startOffset: input.selectionStart, endOffset: input.selectionEnd };
+    update();
+  });
+  source.addEventListener('toggle', update);
   dialog.querySelector('[data-back]')!.addEventListener('click', () => dialog.close());
-  dialog.querySelector('[data-add]')!.addEventListener('click', () => {
-    if (!input.value.trim()) return;
-    const quote = `引用自对话「${chat.title || '未命名对话'}」\n对话 ID ${chat.id}，消息 ID ${messageId}\n\n${input.value.split('\n').map(line => `> ${line}`).join('\n')}\n\n`;
-    onAdd(quote);
+  add.addEventListener('click', () => {
+    if (!chosen || add.disabled) return;
+    onAdd({ text: text.slice(chosen.startOffset, chosen.endOffset), annotation: opinion.value.trim(),
+      source: { messageId, ...chosen } });
     dialog.close();
   });
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
   document.body.append(dialog);
   dialog.showModal();
+  if (source.open) input.focus();
+  else opinion.focus();
+  input.setSelectionRange(selection?.startOffset ?? 0, selection?.endOffset ?? 0);
+  update();
+}
+
+export function renderAnnotations(container: HTMLElement, annotations: ResponseAnnotation[],
+  onRemove?: (index: number) => void, onEdit?: (index: number) => void): void {
+  container.replaceChildren();
+  container.hidden = !annotations.length;
+  for (const [index, annotation] of annotations.entries()) {
+    const card = document.createElement('div');
+    card.className = 'annotation-card';
+    const body = document.createElement(onEdit ? 'button' : 'div');
+    if (onEdit) {
+      (body as HTMLButtonElement).type = 'button';
+      body.className = 'annotation-edit';
+      body.setAttribute('aria-label', `编辑选段 ${index + 1} 的意见`);
+      body.addEventListener('click', () => onEdit(index));
+    }
+    const excerpt = document.createElement('blockquote');
+    excerpt.className = 'annotation-excerpt';
+    excerpt.textContent = annotation.text;
+    body.append(excerpt);
+    if (annotation.annotation) {
+      const comment = document.createElement('p');
+      comment.className = 'annotation-comment';
+      comment.textContent = annotation.annotation;
+      body.append(comment);
+    }
+    card.append(body);
+    if (onRemove) {
+      const remove = document.createElement('button');
+      remove.className = 'quiet';
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `移除选段 ${index + 1}`);
+      remove.textContent = '×';
+      remove.addEventListener('click', () => onRemove(index));
+      card.append(remove);
+    }
+    container.append(card);
+  }
 }

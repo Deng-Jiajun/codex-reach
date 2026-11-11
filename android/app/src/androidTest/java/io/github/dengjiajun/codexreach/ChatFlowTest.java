@@ -76,7 +76,7 @@ public class ChatFlowTest {
                 control("online");
                 await(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
-                await(webView, "document.querySelector('#chat-state').textContent==='空闲' && document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
+                await(webView, "document.querySelector('#chat-state').dataset.status==='idle' && document.querySelector('#chat-state').hidden && document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
                 evaluate(webView, "document.querySelector('#back-button').click(); null");
                 await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-error\"]').click(); null");
