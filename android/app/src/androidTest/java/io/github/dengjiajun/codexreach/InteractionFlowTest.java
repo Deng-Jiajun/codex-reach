@@ -284,7 +284,8 @@ public class InteractionFlowTest {
     }
 
     private String requestCard(Object id) throws Exception {
-        return "([...document.querySelectorAll('#requests .request-card')].find(card=>card.dataset.requestId===JSON.stringify(" + JSONObject.valueToString(id) + ")))";
+        String jsonId = id instanceof String ? JSONObject.quote((String) id) : String.valueOf(id);
+        return "([...document.querySelectorAll('#requests .request-card')].find(card=>card.dataset.requestId===JSON.stringify(" + jsonId + ")))";
     }
 
     private String asyncCard(int index) {
