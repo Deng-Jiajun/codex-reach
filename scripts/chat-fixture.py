@@ -47,6 +47,133 @@ def initial_task_state():
 task_state = initial_task_state()
 
 
+def interaction_request(request_id, method, params, **details):
+    return {
+        "id": request_id, "method": method,
+        "params": {"threadId": "fixture-interactions", "turnId": "interaction-turn", **params},
+        **details,
+    }
+
+
+def initial_interaction_state():
+    return {
+        "revision": 1, "pulse": 0, "receipts": {}, "responses": [],
+        "messageRequests": [], "editRequests": [], "openCount": 0,
+        "postCounts": {"respond": 0, "messages": 0, "edit": 0},
+        "awaitingMessages": [], "awaitingEdits": [], "skillReady": False,
+        "editableTurn": None,
+        "turns": [{"id": "interaction-turn", "status": "completed", "messages": [
+            {"id": "interaction-user", "kind": "user", "text": "INTERACTION_USER", "phase": None},
+            {"id": "interaction-pulse", "kind": "assistant", "text": "INTERACTION_PULSE_0", "phase": "final_answer"},
+        ]}],
+        "pending": [
+            interaction_request(47, "item/commandExecution/requestApproval", {
+                "itemId": "command-item", "kind": "command", "startedAtMs": 1794326400000,
+                "approvalId": "callback-id-is-not-request-id", "environmentId": None,
+                "reason": "COMMAND_NUMERIC_ID", "command": "fixture-tool --check", "cwd": "C:\\Example",
+                "availableDecisions": ["accept", {"acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": ["fixture-tool", "--check"]}}, "decline", "cancel"],
+            }),
+            interaction_request("47", "item/fileChange/requestApproval", {
+                "itemId": "file-item", "startedAtMs": 1794326400000,
+                "reason": "FILE_STRING_ID", "grantRoot": "C:\\Example\\output",
+            }, changes=[{"path": "C:\\Example\\output\\result.txt", "kind": {"type": "update"},
+                "diff": "@@ -1 +1 @@\n-before\n+after"}]),
+            interaction_request("network-rule", "item/commandExecution/requestApproval", {
+                "itemId": "network-item", "kind": "command", "startedAtMs": 1794326400000,
+                "environmentId": None, "command": "fixture-network-check", "cwd": "C:\\Example",
+                "availableDecisions": [{"applyNetworkPolicyAmendment": {
+                    "network_policy_amendment": {"host": "fixture.invalid", "action": "deny"}}}, "cancel"],
+            }),
+            interaction_request("permission", "item/permissions/requestApproval", {
+                "itemId": "permission-item", "startedAtMs": 1794326400000,
+                "environmentId": None, "cwd": "C:\\Example", "reason": "PERMISSION_FIELDS",
+                "permissions": {"network": {"enabled": True}, "fileSystem": {
+                    "read": ["C:\\Example\\input"], "write": None, "globScanMaxDepth": 3,
+                    "entries": [
+                        {"path": {"type": "path", "path": "C:\\Example\\output"}, "access": "write"},
+                        {"path": {"type": "glob_pattern", "pattern": "C:\\Example\\private\\**"}, "access": "deny"},
+                    ],
+                }},
+            }),
+            interaction_request("mcp-form", "mcpServer/elicitation/request", {
+                "mode": "form", "serverName": "fixture", "message": "MCP_FORM_VALUES", "_meta": None,
+                "requestedSchema": {"type": "object", "properties": {
+                    "name": {"type": "string", "title": "名称", "minLength": 2},
+                    "count": {"type": "integer", "title": "数量", "minimum": 1, "maximum": 3},
+                    "confirmed": {"type": "boolean", "title": "确认"},
+                    "mode": {"type": "string", "title": "方式", "enum": ["safe", "fast"], "enumNames": ["安全", "快速"]},
+                    "features": {"type": "array", "title": "内容", "minItems": 1, "maxItems": 2,
+                        "items": {"type": "string", "enum": ["logs", "summary"]}},
+                    "note": {"type": "string", "title": "可选备注"},
+                }, "required": ["name", "count", "confirmed", "mode", "features"]},
+            }),
+            interaction_request(48, "mcpServer/elicitation/request", {
+                "mode": "url", "serverName": "fixture", "message": "MCP_URL_CONTINUE", "_meta": None,
+                "url": "https://fixture.invalid/verification", "elicitationId": "url-elicitation-id",
+            }),
+            interaction_request("unsupported-form", "mcpServer/elicitation/request", {
+                "mode": "form", "serverName": "fixture", "message": "UNSUPPORTED_NESTED_FORM", "_meta": None,
+                "requestedSchema": {"type": "object", "properties": {"nested": {"type": "object", "properties": {}}}},
+            }),
+            interaction_request("verification", "mcpServer/elicitation/request", {
+                "mode": "openai/userVerification", "serverName": "fixture", "title": "IDENTITY_REQUIRED",
+                "description": "Synthetic desktop verification", "challenge": "synthetic-challenge", "_meta": None,
+            }, desktopRequired=True),
+            interaction_request("file-incomplete", "item/fileChange/requestApproval", {
+                "itemId": "incomplete-file", "startedAtMs": 1794326400000, "reason": "MISSING_DIFF",
+            }),
+            interaction_request("completed-request", "mcpServer/elicitation/request", {
+                "mode": "url", "serverName": "fixture", "message": "COMPLETED_REQUEST_MUST_HIDE", "_meta": None,
+                "url": "https://fixture.invalid/completed", "elicitationId": "completed",
+            }, completed=True),
+        ],
+    }
+
+
+interaction_state = initial_interaction_state()
+
+
+def same_request_id(left, right):
+    return type(left) is type(right) and left == right
+
+
+def release_interaction_messages():
+    for request in interaction_state["awaitingMessages"]:
+        prompt = request["prompt"]
+        replies = None
+        if prompt.startswith("<send_user_message_question_reply>\n"):
+            replies = json.loads(prompt.split("\n", 1)[1].rsplit("\n", 1)[0])
+        turn_id = "interaction-message-" + request["requestId"]
+        user_id = "user-" + request["requestId"]
+        user = {"id": user_id, "kind": "user", "text": prompt, "phase": None}
+        if replies:
+            user["questionReplies"] = replies
+        interaction_state["turns"].append({"id": turn_id, "status": "completed", "messages": [
+            user, {"id": "reply-" + request["requestId"], "kind": "assistant", "phase": "final_answer",
+                "text": "ASYNC_REPLY_ACCEPTED" if replies else "SKILL_PRE_EDIT_REPLY"},
+        ]})
+        if not replies:
+            interaction_state["editableTurn"] = {"turnId": turn_id, "messageId": user_id, "prompt": prompt}
+        interaction_state["receipts"][request["requestId"]]["status"] = "accepted"
+        interaction_state["receipts"][request["requestId"]]["error"] = None
+    interaction_state["awaitingMessages"].clear()
+
+
+def release_interaction_edits():
+    for request in interaction_state["awaitingEdits"]:
+        turn_index = next(index for index, turn in enumerate(interaction_state["turns"]) if turn["id"] == request["turnId"])
+        turn_id = "interaction-edited-" + request["requestId"]
+        user_id = "edited-user-" + request["requestId"]
+        interaction_state["turns"][turn_index:] = [{"id": turn_id, "status": "completed", "messages": [
+            {"id": user_id, "kind": "user", "text": request["prompt"], "phase": None},
+            {"id": "edited-reply", "kind": "assistant", "text": "EDIT_REPLACED_REPLY", "phase": "final_answer"},
+        ]}]
+        interaction_state["editableTurn"] = {"turnId": turn_id, "messageId": user_id, "prompt": request["prompt"]}
+        interaction_state["receipts"][request["requestId"]]["status"] = "accepted"
+    interaction_state["awaitingEdits"].clear()
+
+
 def loading_turn(older=False):
     if older:
         messages = [{"id": "loading-older", "kind": "assistant", "text": "LOADING_OLDER", "phase": "final_answer"}]
@@ -88,6 +215,12 @@ class Handler(BaseHTTPRequestHandler):
                         "stopMismatches", "initialReads", "olderReads", "loadingLiveReads"]
                 }})
             return
+        if url.path == "/control/interaction-stats":
+            with condition:
+                self.reply({key: interaction_state[key] for key in [
+                    "responses", "messageRequests", "editRequests", "openCount", "postCounts",
+                ]})
+            return
         if not self.authorized():
             return
         if url.path == '/api/threads':
@@ -107,9 +240,27 @@ class Handler(BaseHTTPRequestHandler):
                     {"id": "fixture-chat", "title": "连接与缓存验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": state["status"], "updatedAt": 1794326400},
                     {"id": "fixture-error", "title": "历史读取异常验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": "idle", "updatedAt": 1794326400},
                     {"id": "fixture-loading", "title": "加载状态验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": "notLoaded", "updatedAt": 1794326400},
+                    {"id": "fixture-interactions", "title": "审批与问答验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": "idle", "updatedAt": 1794326400},
                 ], "nextCursor": None}
                 if task_state["task"]:
                     result["threads"].append({"id": "fixture-task", "title": "任务创建验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": task_state["task"]["status"], "updatedAt": 1794326400})
+            elif url.path in ("/api/threads/fixture-interactions/history", "/api/threads/fixture-interactions/live"):
+                if url.path.endswith("/live"):
+                    if parse_qs(url.query).get("after", [None])[0] == str(interaction_state["revision"]):
+                        condition.wait(timeout=0.4)
+                    result = {"available": True, "revision": str(interaction_state["revision"]),
+                        "turns": interaction_state["turns"], "complete": True, "status": "idle",
+                        "activeTurnId": None, "model": "fixture-standard", "requests": interaction_state["pending"],
+                        "waiting": any(not request.get("completed") for request in interaction_state["pending"]),
+                        "editableTurn": interaction_state["editableTurn"]}
+                else:
+                    result = {"id": "fixture-interactions", "title": "审批与问答验证", "cwd": "C:\\Example", "status": "idle",
+                        "turns": interaction_state["turns"], "nextCursor": None, "hasMore": False}
+            elif url.path == "/api/threads/fixture-interactions/skills":
+                result = {"skills": [
+                    {"name": "interaction-check", "path": "C:\\Skills\\interaction-check\\SKILL.md", "description": "精确协议与交互核对"},
+                    {"name": "review-only", "path": "C:\\Skills\\review-only\\SKILL.md", "description": "只读代码审查"},
+                ], "errors": [], "sendingSupported": interaction_state["skillReady"]}
             elif url.path == "/api/threads/fixture-loading/history":
                 older = bool(parse_qs(url.query).get("cursor"))
                 task_state["olderReads" if older else "initialReads"] += 1
@@ -163,7 +314,7 @@ class Handler(BaseHTTPRequestHandler):
                     "activeTurnId": state["turns"][-1]["id"] if state["status"] == "active" else None, "model": "fixture-standard", "waiting": False}
             elif url.path.startswith("/api/requests/"):
                 request_id = url.path.rsplit("/", 1)[1]
-                result = state["requests"].get(request_id) or task_state["requests"].get(request_id)
+                result = state["requests"].get(request_id) or task_state["requests"].get(request_id) or interaction_state["receipts"].get(request_id)
                 if result is None:
                     self.reply({"error": "未找到发送记录"}, 404)
                     return
@@ -173,6 +324,45 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
+        if self.path in ("/control/interactions-reset", "/control/interaction-pulse", "/control/resolve-response",
+                "/control/interaction-questions", "/control/message-unknown", "/control/release-message", "/control/release-edit"):
+            with condition:
+                if self.path == "/control/interactions-reset":
+                    interaction_state.clear()
+                    interaction_state.update(initial_interaction_state())
+                    state["online"] = True
+                elif self.path == "/control/interaction-pulse":
+                    interaction_state["pulse"] += 1
+                    interaction_state["turns"][0]["messages"][1]["text"] = f"INTERACTION_PULSE_{interaction_state['pulse']}"
+                elif self.path == "/control/resolve-response":
+                    interaction_state["pending"] = [pending for pending in interaction_state["pending"] if not any(
+                        same_request_id(pending["id"], response["approvalRequestId"]) for response in interaction_state["responses"])]
+                elif self.path == "/control/interaction-questions":
+                    interaction_state["pending"] = [interaction_request("sync-input", "item/tool/requestUserInput", {
+                        "itemId": "input-item", "questions": [
+                            {"id": "choice", "header": "方式", "question": "请选择处理方式", "isOther": True, "isSecret": False,
+                                "options": [{"label": "检查", "description": "先检查"}, {"label": "继续", "description": "继续执行"}]},
+                            {"id": "detail", "header": "说明", "question": "补充处理说明", "isOther": True, "isSecret": False, "options": None},
+                        ],
+                    })]
+                    interaction_state["turns"][0]["messages"].append({"id": "async-question-item", "kind": "assistant",
+                        "text": "ASYNC_QUESTIONS_READY", "phase": "commentary", "questions": [
+                            {"title": "选择下一步", "options": ["检查", "继续"]},
+                            {"title": "填写后续说明", "options": None},
+                        ]})
+                elif self.path == "/control/message-unknown":
+                    for request in interaction_state["awaitingMessages"]:
+                        receipt = interaction_state["receipts"][request["requestId"]]
+                        receipt["status"] = "unknown"
+                        receipt["error"] = "合成回执暂时无法确认"
+                elif self.path == "/control/release-message":
+                    release_interaction_messages()
+                else:
+                    release_interaction_edits()
+                interaction_state["revision"] += 1
+                condition.notify_all()
+                self.reply({"ok": True})
+            return
         if self.path in ("/control/tasks-reset", "/control/release-initial", "/control/release-older", "/control/loading-pulse", "/control/advance-task"):
             with condition:
                 if self.path == "/control/tasks-reset":
@@ -214,6 +404,43 @@ class Handler(BaseHTTPRequestHandler):
             self.reply({"ok": True})
             return
         if not self.authorized():
+            return
+        if self.path == "/api/threads/fixture-interactions/open":
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            with condition:
+                interaction_state["openCount"] += 1
+                interaction_state["skillReady"] = True
+                self.reply({"ok": True})
+            return
+        if self.path in ("/api/threads/fixture-interactions/respond", "/api/threads/fixture-interactions/messages", "/api/threads/fixture-interactions/edit"):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            operation = self.path.rsplit("/", 1)[1]
+            with condition:
+                interaction_state["postCounts"][operation] += 1
+                request_id = request["requestId"]
+                receipt = interaction_state["receipts"].get(request_id)
+                if receipt:
+                    self.reply(receipt, 202)
+                    return
+                if operation == "respond":
+                    if not any(not pending.get("completed") and same_request_id(pending["id"], request["approvalRequestId"])
+                            for pending in interaction_state["pending"]):
+                        self.reply({"error": "待处理请求已变化"}, 409)
+                        return
+                    interaction_state["responses"].append(request)
+                elif operation == "messages":
+                    interaction_state["messageRequests"].append(request)
+                    interaction_state["awaitingMessages"].append(request)
+                else:
+                    if not interaction_state["editableTurn"] or request["turnId"] != interaction_state["editableTurn"]["turnId"]:
+                        self.reply({"error": "可编辑轮次已变化"}, 409)
+                        return
+                    interaction_state["editRequests"].append(request)
+                    interaction_state["awaitingEdits"].append(request)
+                receipt = {"requestId": request_id, "chatId": "fixture-interactions",
+                    "status": "accepted" if operation == "respond" else "sending", "error": None, "result": {"ok": True}}
+                interaction_state["receipts"][request_id] = receipt
+                self.reply(receipt, 202)
             return
         if self.path in ("/api/threads", "/api/threads/fixture-task/stop", "/api/threads/fixture-task/messages"):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))

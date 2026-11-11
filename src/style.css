@@ -130,3 +130,40 @@ h1 { font-size: 25px; line-height: 1.3; }
   .messages-scroll { padding-left: 42px; padding-right: 42px; }
   .composer-area { padding-left: 36px; padding-right: 36px; }
 }
+
+.message.user { flex-direction: column; align-items: flex-end; }
+.edit-message { padding: 2px 8px; min-height: 32px; font-size: 12px; }
+.selected-skills { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.skill-chip { border: 1px solid #cbd8c8; background: #e8eee5; color: #395542; border-radius: 8px; padding: 4px 9px; font-size: 12px; }
+.skills-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.task-dialog .skill-choice { flex-direction: row; align-items: flex-start; gap: 12px; padding: 12px 0; border-bottom: 1px solid #dce2d7; }
+.task-dialog .skill-choice input { flex-shrink: 0; width: 18px; height: 18px; margin: 3px 0 0; accent-color: #294f3d; }
+.skill-choice > span { display: flex; flex-direction: column; gap: 4px; }
+#skills-search { width: 100%; margin-top: 12px; }
+#open-skill-chat { margin: 4px 0 8px; text-decoration: underline; }
+.async-questions { margin: 14px 0; }
+
+.request-card { padding: 16px; margin: 18px 0; border: 1px solid #cedac8; border-radius: 13px; background: #f0f4ec; min-width: 0; }
+.request-card h3 { margin: 0 0 12px; font-size: 15px; }
+.request-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.request-detail { margin: 9px 0; font-size: 12px; }
+.request-detail strong { font-weight: 600; color: #526558; }
+.request-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; padding: 9px; margin: 5px 0; background: #e6ece2; border-radius: 7px; font-size: 12px; line-height: 1.6; }
+.request-status, .request-desktop { font-size: 12px; margin: 10px 0; color: #795b2e; overflow-wrap: anywhere; }
+.request-action { display: inline-flex; align-items: center; justify-content: center; margin: 10px 8px 0 0; min-height: 40px; padding: 8px 12px; font-size: 13px; }
+.request-question { display: flex; flex-direction: column; gap: 9px; padding: 0; margin: 14px 0; border: 0; min-width: 0; }
+.request-question legend { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+.request-choice { display: flex; align-items: flex-start; gap: 9px; font-size: 13px; margin: 5px 0; }
+.request-choice input { width: 17px; height: 17px; flex-shrink: 0; margin: 3px 0 0; accent-color: #294f3d; }
+.request-choice span { min-width: 0; }
+.request-answer, .request-field { width: 100%; margin-top: 6px; font-size: 14px; }
+.request-field-label { display: block; margin: 13px 0; font-size: 13px; }
+.request-link { display: inline-block; color: #336e50; margin: 10px 0; overflow-wrap: anywhere; }
+
+.request-question > textarea, .request-question > input { width: 100%; font-size: 14px; }
+.request-choice { display: grid; grid-template-columns: 17px minmax(0, 1fr); column-gap: 9px; row-gap: 2px; }
+.request-choice small { grid-column: 2; color: #6d786e; }
+.request-field input, .request-field select { width: 100%; }
+.request-field small { display: block; color: #6d786e; margin: -6px 0 7px; }
+.request-field-label { margin-bottom: 7px; }
+.request-question-title { font-size: 14px; font-weight: 600; }

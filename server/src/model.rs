@@ -7,6 +7,14 @@ pub struct TurnOptions {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillSelection>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct SkillSelection {
+    pub name: String,
+    pub path: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -16,6 +24,10 @@ pub struct Message {
     pub kind: String,
     pub text: String,
     pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub question_replies: Vec<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -50,7 +62,10 @@ fn message(item: &Value) -> Option<Message> {
     let kind = item["type"].as_str()?;
     let (role, body) = match kind {
         "userMessage" | "steeringUserMessage" => {
-            let parts = item["content"].as_array()?;
+            let parts = item
+                .get("content")
+                .or_else(|| item.get("input"))?
+                .as_array()?;
             let body = parts
                 .iter()
                 .filter_map(|part| match part["type"].as_str() {
@@ -120,7 +135,21 @@ fn message(item: &Value) -> Option<Message> {
         "fileChange" => ("tool", "文件变更".to_owned()),
         _ => return None,
     };
-    if body.is_empty() {
+    let questions = if kind == "agentMessage" {
+        item["questions"].as_array().cloned().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let accepted_user_input = kind == "userMessage"
+        || (kind == "functionCallOutput" && role == "user")
+        || (kind == "steeringUserMessage"
+            && (item["status"] == "accepted" || item["steerAcknowledged"] == true));
+    let question_replies = if accepted_user_input {
+        question_replies(&body)
+    } else {
+        Vec::new()
+    };
+    if body.is_empty() && questions.is_empty() {
         return None;
     }
     Some(Message {
@@ -128,7 +157,203 @@ fn message(item: &Value) -> Option<Message> {
         kind: role.to_owned(),
         text: body,
         phase: item["phase"].as_str().map(str::to_owned),
+        questions,
+        question_replies,
     })
+}
+
+fn question_replies(text: &str) -> Vec<Value> {
+    let Some(body) = text
+        .trim()
+        .strip_prefix("<send_user_message_question_reply>")
+        .and_then(|value| value.strip_suffix("</send_user_message_question_reply>"))
+    else {
+        return Vec::new();
+    };
+    let Ok(Value::Array(replies)) = serde_json::from_str::<Value>(body.trim()) else {
+        return Vec::new();
+    };
+    replies
+        .into_iter()
+        .filter(|reply| {
+            ["questionItemId", "question", "answer"]
+                .iter()
+                .all(|key| reply[*key].is_string())
+        })
+        .collect()
+}
+
+pub fn raw_turns(state: &Value) -> Vec<Value> {
+    if state["turnHistory"]["kind"] != "canonical" {
+        return state["turns"].as_array().cloned().unwrap_or_default();
+    }
+    let history = &state["turnHistory"]["history"];
+    let mut turns: Vec<Value> = history["islands"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|island| island["entries"].as_array().into_iter().flatten())
+        .filter_map(|entry| entry["value"].as_str())
+        .filter_map(|key| history["entitiesByKey"].get(key))
+        .cloned()
+        .collect();
+    // Canonical history and the desktop's optimistic turns share ordering anchors.
+    let mut pending = Vec::new();
+    for overlay in state["turns"].as_array().into_iter().flatten() {
+        let id = overlay.get("turnId").or_else(|| overlay.get("id"));
+        let index = id.filter(|id| !id.is_null()).and_then(|id| {
+            turns
+                .iter()
+                .position(|turn| turn.get("turnId").or_else(|| turn.get("id")) == Some(id))
+        });
+        if let Some(index) = index {
+            turns[index] = merge_overlay_turn(&turns[index], overlay);
+            turns.splice(index..index, pending.drain(..));
+        } else {
+            pending.push(overlay.clone());
+        }
+    }
+    turns.extend(pending);
+    turns
+}
+
+fn merge_overlay_turn(canonical: &Value, overlay: &Value) -> Value {
+    let mut merged = overlay.clone();
+    let existing = canonical["items"].as_array().cloned().unwrap_or_default();
+    let incoming = overlay["items"].as_array().cloned().unwrap_or_default();
+    let paginated =
+        !canonical["itemsPagination"].is_null() || !overlay["itemsPagination"].is_null();
+    let steering = existing
+        .iter()
+        .any(|item| item["type"] == "steeringUserMessage");
+    let items = if paginated || steering {
+        let mut items = existing;
+        let mut pending = Vec::new();
+        for item in incoming {
+            if let Some(index) = items.iter().position(|old| old["id"] == item["id"]) {
+                if !paginated && items[index]["type"] == "agentMessage" {
+                    items[index] = item;
+                }
+                items.splice(index..index, pending.drain(..));
+            } else {
+                pending.push(item);
+            }
+        }
+        items.extend(pending);
+        items
+    } else if existing.len() > incoming.len() {
+        let mut items = existing;
+        if let Some(final_answer) = incoming
+            .iter()
+            .rev()
+            .find(|item| item["type"] == "agentMessage" && item["phase"] == "final_answer")
+        {
+            let present = items.iter().any(|item| {
+                item["type"] == "agentMessage"
+                    && (item["id"] == final_answer["id"]
+                        || (item["phase"] == "final_answer"
+                            && item["text"] == final_answer["text"]))
+            });
+            if !present {
+                items.push(final_answer.clone());
+            }
+        }
+        items
+    } else {
+        incoming
+    };
+    merged["items"] = json!(items);
+    if paginated && canonical["status"] != "inProgress" && overlay["status"] == "inProgress" {
+        merged["status"] = canonical["status"].clone();
+    }
+    if !canonical["params"]["clientUserMessageId"].is_null()
+        && canonical["params"]["input"]
+            .as_array()
+            .is_some_and(|input| !input.is_empty())
+        && overlay["params"]["input"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        merged["params"] = canonical["params"].clone();
+    }
+    merged
+}
+
+pub fn editable_turn(state: &Value) -> Option<Value> {
+    let turns = raw_turns(state);
+    let index = turns.iter().rposition(|turn| {
+        turn["params"]["input"]
+            .as_array()
+            .is_some_and(|input| !input.is_empty())
+    })?;
+    if turns[index..]
+        .iter()
+        .any(|turn| turn["status"] == "inProgress")
+    {
+        return None;
+    }
+    let turn = &turns[index];
+    let item = turn["items"]
+        .as_array()?
+        .iter()
+        .find(|item| item["type"] == "userMessage")?;
+    let prompt = item["content"]
+        .as_array()?
+        .iter()
+        .filter(|part| part["type"] == "text")
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(
+        json!({"turnId":turn.get("turnId").unwrap_or(&turn["id"]),"messageId":item["id"],"prompt":prompt}),
+    )
+}
+
+pub fn pending_requests(state: &Value) -> Vec<Value> {
+    let turns = raw_turns(state);
+    state["requests"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|request| request["completed"] != true)
+        .map(|request| {
+            let mut request = request.clone();
+            let method = request["method"].as_str().unwrap_or_default().to_owned();
+            let mut desktop_required = !matches!(
+                method.as_str(),
+                "item/commandExecution/requestApproval"
+                    | "item/fileChange/requestApproval"
+                    | "item/permissions/requestApproval"
+                    | "item/tool/requestUserInput"
+                    | "mcpServer/elicitation/request"
+            );
+            if method == "item/fileChange/requestApproval" {
+                let item = turns
+                    .iter()
+                    .filter(|turn| {
+                        request["params"]["turnId"].is_null()
+                            || turn.get("turnId").unwrap_or(&turn["id"])
+                                == &request["params"]["turnId"]
+                    })
+                    .flat_map(|turn| turn["items"].as_array().into_iter().flatten())
+                    .find(|item| {
+                        item["type"] == "fileChange" && item["id"] == request["params"]["itemId"]
+                    });
+                if let Some(changes) = item.and_then(|item| item["changes"].as_array()) {
+                    request["changes"] = json!(changes);
+                } else {
+                    desktop_required = true;
+                }
+            }
+            if method == "mcpServer/elicitation/request"
+                && request["params"]["mode"] == "openai/userVerification"
+            {
+                desktop_required = true;
+            }
+            request["desktopRequired"] = json!(desktop_required);
+            request
+        })
+        .collect()
 }
 
 pub fn turn(value: &Value) -> Turn {
@@ -170,24 +395,8 @@ pub fn history_turns(page: &Value) -> Vec<Turn> {
 
 pub fn stream_view(state: &Value) -> Value {
     let history = &state["turnHistory"]["history"];
-    let mut turns: Vec<Turn> = if state["turnHistory"]["kind"] == "canonical" {
-        history["islands"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .flat_map(|island| island["entries"].as_array().into_iter().flatten())
-            .filter_map(|entry| entry["value"].as_str())
-            .filter_map(|key| history["entitiesByKey"].get(key))
-            .map(turn)
-            .collect()
-    } else {
-        state["turns"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(turn)
-            .collect()
-    };
+    let mut turns: Vec<Turn> = raw_turns(state).iter().map(turn).collect();
+    let requests = pending_requests(state);
     let active_turn_id = turns
         .iter()
         .rev()
@@ -212,7 +421,9 @@ pub fn stream_view(state: &Value) -> Value {
         "activeTurnId": active_turn_id,
         "model": state["latestModel"],
         "title": state["title"],
-        "waiting": state["requests"].as_array().map(|requests| !requests.is_empty()).unwrap_or(false)
+        "waiting": !requests.is_empty(),
+        "requests":requests,
+        "editableTurn":editable_turn(state)
     })
 }
 
@@ -237,11 +448,121 @@ mod tests {
     }
 
     #[test]
+    fn merges_overlay_turns_at_canonical_anchors_and_keeps_latest_active_turn() {
+        let state = json!({"turnHistory":{"kind":"canonical","history":{
+            "entitiesByKey":{
+                "a":{"turnId":"a","status":"completed","items":[{"id":"a-text","type":"agentMessage","text":"old"}]},
+                "b":{"turnId":"b","status":"completed","items":[]}
+            },"islands":[{"entries":[{"value":"a"},{"value":"b"}]}]
+        }},"turns":[
+            {"turnId":"a","status":"completed","items":[{"id":"a-text","type":"agentMessage","text":"updated"}]},
+            {"turnId":"between","status":"completed","items":[]},
+            {"turnId":"b","status":"completed","items":[]},
+            {"turnId":"running","status":"inProgress","items":[]}
+        ]});
+        let turns = raw_turns(&state);
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| text(turn, "turnId"))
+                .collect::<Vec<_>>(),
+            ["a", "between", "b", "running"]
+        );
+        assert_eq!(turns[0]["items"][0]["text"], "updated");
+        assert_eq!(stream_view(&state)["activeTurnId"], "running");
+        assert!(editable_turn(&state).is_none());
+    }
+
+    #[test]
+    fn paginated_overlay_preserves_loaded_items_terminal_status_and_original_input() {
+        let canonical = json!({"turnId":"a","status":"completed","params":{"clientUserMessageId":"client","input":[{"type":"text","text":"original"}]},
+            "itemsPagination":{},"items":[{"id":"u","type":"userMessage","content":[{"type":"text","text":"original"}]},
+                {"id":"last","type":"agentMessage","text":"completed answer"}]});
+        let overlay = json!({"turnId":"a","status":"inProgress","params":{"input":[]},"items":[
+            {"id":"middle","type":"agentMessage","text":"middle"},
+            {"id":"last","type":"agentMessage","text":"stale partial"},
+            {"id":"new","type":"agentMessage","text":"new"}]});
+        let merged = merge_overlay_turn(&canonical, &overlay);
+        assert_eq!(merged["status"], "completed");
+        assert_eq!(merged["params"]["input"][0]["text"], "original");
+        assert_eq!(
+            merged["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| text(item, "id"))
+                .collect::<Vec<_>>(),
+            ["u", "middle", "last", "new"]
+        );
+        assert_eq!(merged["items"][2]["text"], "completed answer");
+    }
+
+    #[test]
     fn displays_an_in_progress_follow_up_as_a_user_message() {
         let item = json!({"id":"follow-up","type":"steeringUserMessage","content":[{"type":"text","text":"追加输入"}]});
         let rendered = message(&item).unwrap();
         assert_eq!(rendered.kind, "user");
         assert_eq!(rendered.text, "追加输入");
+    }
+
+    #[test]
+    fn retains_public_questions_without_assistant_text() {
+        let value = message(&json!({"id":"ask","type":"agentMessage","text":"",
+            "questions":[{"title":"选择项目","options":["A","B"]}]}))
+        .unwrap();
+        assert_eq!(value.kind, "assistant");
+        assert_eq!(value.questions[0]["title"], "选择项目");
+    }
+
+    #[test]
+    fn only_accepted_steering_input_marks_async_questions_answered() {
+        let reply = "<send_user_message_question_reply>\n[{\"questionItemId\":\"q\",\"question\":\"选择\",\"answer\":\"A\"}]\n</send_user_message_question_reply>";
+        let mut item = json!({"id":"answer","type":"steeringUserMessage","input":[{"type":"text","text":reply}],"status":"pending"});
+        assert!(message(&item).unwrap().question_replies.is_empty());
+        item["status"] = json!("accepted");
+        assert_eq!(message(&item).unwrap().question_replies[0]["answer"], "A");
+        item["status"] = json!("pending");
+        item["steerAcknowledged"] = json!(true);
+        assert_eq!(message(&item).unwrap().question_replies.len(), 1);
+    }
+
+    #[test]
+    fn forwarded_desktop_input_marks_async_question_answered() {
+        let reply = "<send_user_message_question_reply>\n[{\"questionItemId\":\"q\",\"question\":\"选择\",\"answer\":\"A\"}]\n</send_user_message_question_reply>";
+        let item = json!({"id":"forwarded","type":"functionCallOutput","namespace":"codex_app","name":"send_message_to_thread", "output":format!("<codex_delegation><input>{reply}</input></codex_delegation>")});
+        let value = message(&item).unwrap();
+        assert_eq!(value.kind, "user");
+        assert_eq!(value.question_replies[0]["answer"], "A");
+    }
+
+    #[test]
+    fn keeps_pending_request_identity_and_file_details() {
+        let state = json!({"requests":[
+            {"id":7,"method":"item/fileChange/requestApproval","params":{"itemId":"patch"}},
+            {"id":"done","method":"item/tool/requestUserInput","completed":true,"params":{}}
+        ],"turns":[{"items":[{"id":"patch","type":"fileChange","changes":[{"path":"file.txt","diff":"+new"}]}]}]});
+        let requests = pending_requests(&state);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["id"], 7);
+        assert_eq!(requests[0]["changes"][0]["diff"], "+new");
+        assert_eq!(requests[0]["desktopRequired"], false);
+    }
+
+    #[test]
+    fn edit_candidate_is_latest_native_user_turn_and_preserves_attachment_separation() {
+        let mut state = json!({"turns":[{"id":"latest","status":"completed","params":{"input":[{"type":"text","text":"original"}]},
+            "items":[{"id":"user","type":"userMessage","content":[{"type":"text","text":"original"},{"type":"localImage","path":"image.png"}]},
+                {"id":"steer","type":"steeringUserMessage","input":[{"type":"text","text":"follow-up"}]}]}]});
+        assert_eq!(
+            editable_turn(&state).unwrap(),
+            json!({"turnId":"latest","messageId":"user","prompt":"original"})
+        );
+        state["turns"][0]["status"] = json!("inProgress");
+        assert!(editable_turn(&state).is_none());
+        state["turns"][0]["status"] = json!("completed");
+        state["turns"].as_array_mut().unwrap().push(json!({"id":"synthetic","status":"completed","params":{"input":[{"type":"text","text":"tool forwarded"}]},
+            "items":[{"id":"tool-input","type":"functionCallOutput","namespace":"codex_app","name":"send_message_to_thread","output":"<input>tool forwarded</input>"}]}));
+        assert!(editable_turn(&state).is_none());
     }
 
     #[test]

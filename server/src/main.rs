@@ -46,6 +46,36 @@ struct AppState {
 }
 
 impl AppState {
+    async fn skill_catalog(&self, chat_id: &str) -> Result<Value> {
+        let metadata = self
+            .app_server
+            .call(
+                "thread/read",
+                json!({"threadId":chat_id,"includeTurns":false}),
+            )
+            .await?;
+        let cwd = metadata["thread"]["cwd"]
+            .as_str()
+            .context("会话缺少工作目录")?;
+        let result = self
+            .app_server
+            .call("skills/list", json!({"cwds":[cwd],"forceReload":false}))
+            .await?;
+        let entries = result["data"].as_array().context("Skill 列表格式无效")?;
+        let skills = entries
+            .iter()
+            .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
+            .filter(|skill| skill["enabled"] == true)
+            .cloned()
+            .collect::<Vec<_>>();
+        let errors = entries
+            .iter()
+            .flat_map(|entry| entry["errors"].as_array().into_iter().flatten())
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(json!({"skills":skills,"errors":errors}))
+    }
+
     async fn ipc(&self) -> Result<Arc<Ipc>> {
         let mut connection = self.ipc.lock().await;
         if let Some(client) = connection
@@ -74,6 +104,20 @@ impl AppState {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _guard = gate.lock().await;
+        if !options.skills.is_empty() {
+            let catalog = self.skill_catalog(chat_id).await?;
+            for selected in &options.skills {
+                ensure!(
+                    catalog["skills"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .any(|skill| skill["name"] == selected.name
+                            && skill["path"] == selected.path),
+                    "所选 Skill 已不可用，请刷新 Skill 列表"
+                );
+            }
+        }
         if let Ok(client) = self.ipc().await
             && let Ok(view) = client.live(chat_id, None).await
             && view["available"] == true
@@ -90,6 +134,10 @@ impl AppState {
                 .await?;
             return Ok(Value::Null);
         }
+        ensure!(
+            options.skills.is_empty(),
+            "会话尚未载入桌面，所选 Skill 未投递。请先在电脑端打开此对话后再发送"
+        );
         let mut arguments = serde_json::to_value(options)?;
         arguments["threadId"] = json!(chat_id);
         arguments["hostId"] = json!("local");
@@ -197,6 +245,30 @@ async fn thread_settings(
     ))
 }
 
+async fn skills(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let mut catalog = state.skill_catalog(&id).await?;
+    let supported = match state.ipc().await {
+        Ok(client) => client.follow(&id).await?.is_some(),
+        Err(_) => false,
+    };
+    catalog["sendingSupported"] = json!(supported);
+    Ok(Json(catalog))
+}
+
+async fn open_thread(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    state
+        .tools
+        .call("navigate_to_codex_page", json!({"threadId":id}))
+        .await?;
+    Ok(Json(json!({"opened":true})))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRequest {
@@ -215,6 +287,12 @@ async fn create_thread(
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "首条消息和有效的请求标识为必填项".to_owned(),
+        ));
+    }
+    if !input.options.skills.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "请先创建对话，再为后续消息选择 Skill".to_owned(),
         ));
     }
     let mut options = serde_json::to_value(&input.options).map_err(anyhow::Error::from)?;
@@ -294,6 +372,104 @@ async fn stop_thread(
             .await;
             if state.outbox.finish(&input.request_id, result).is_err() {
                 eprintln!("无法保存停止请求的结果，请检查本地操作数据库");
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RespondRequest {
+    request_id: String,
+    approval_request_id: Value,
+    response: Value,
+}
+
+async fn respond(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<RespondRequest>,
+) -> Result<(StatusCode, Json<Receipt>), ApiError> {
+    if Uuid::parse_str(&input.request_id).is_err()
+        || !(input.approval_request_id.is_string() || input.approval_request_id.as_i64().is_some())
+        || !input.response.is_object()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "回复请求需要有效操作标识、原始请求 ID 和响应内容".to_owned(),
+        ));
+    }
+    let options = json!({"approvalRequestId":input.approval_request_id,"response":input.response});
+    let (receipt, fresh) = state
+        .outbox
+        .reserve(&input.request_id, "respond", &id, "", &options)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    if fresh {
+        tokio::spawn(async move {
+            let result = async {
+                state
+                    .ipc()
+                    .await?
+                    .respond(&id, &input.approval_request_id, &input.response)
+                    .await
+            }
+            .await;
+            if state.outbox.finish(&input.request_id, result).is_err() {
+                eprintln!("无法保存确认回复的结果，请检查本地操作数据库");
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EditRequest {
+    request_id: String,
+    turn_id: String,
+    prompt: String,
+}
+
+async fn edit(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<EditRequest>,
+) -> Result<(StatusCode, Json<Receipt>), ApiError> {
+    if Uuid::parse_str(&input.request_id).is_err()
+        || input.turn_id.is_empty()
+        || input.prompt.trim().is_empty()
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "编辑请求需要有效操作标识、轮次和消息正文".to_owned(),
+        ));
+    }
+    let options = json!({"turnId":input.turn_id});
+    let (receipt, fresh) = state
+        .outbox
+        .reserve(&input.request_id, "edit", &id, &input.prompt, &options)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    if fresh {
+        tokio::spawn(async move {
+            let result = async {
+                let gate = state
+                    .send_locks
+                    .lock()
+                    .await
+                    .entry(id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone();
+                let _guard = gate.lock().await;
+                state
+                    .ipc()
+                    .await?
+                    .edit(&id, &input.turn_id, &input.prompt)
+                    .await
+            }
+            .await;
+            if state.outbox.finish(&input.request_id, result).is_err() {
+                eprintln!("无法保存编辑操作的结果，请检查本地操作数据库");
             }
         });
     }
@@ -521,7 +697,11 @@ async fn main() -> Result<()> {
         .route("/threads", get(threads).post(create_thread))
         .route("/threads/{id}/history", get(history))
         .route("/threads/{id}/settings", get(thread_settings))
+        .route("/threads/{id}/skills", get(skills))
+        .route("/threads/{id}/open", post(open_thread))
         .route("/threads/{id}/stop", post(stop_thread))
+        .route("/threads/{id}/respond", post(respond))
+        .route("/threads/{id}/edit", post(edit))
         .route("/threads/{id}/live", get(live))
         .route("/threads/{id}/messages", post(send))
         .route("/requests/{id}", get(receipt))

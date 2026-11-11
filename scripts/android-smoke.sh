@@ -60,6 +60,31 @@ grep -q 'OK (1 test)' artifacts/instrumentation-task-flow.txt
 adb pull "/sdcard/Android/data/$package/files/verification-task-flow.png" artifacts/
 curl --fail --silent http://127.0.0.1:4320/control/stats > artifacts/task-stats.json
 
+for stage in approvals questions question-persist skills-edit; do
+  adb shell am force-stop "$package"
+  adb shell am instrument -w -r \
+    -e class io.github.dengjiajun.codexreach.InteractionFlowTest \
+    -e stage "$stage" \
+    "$package.test/androidx.test.runner.AndroidJUnitRunner" \
+    | tee "artifacts/instrumentation-interaction-$stage.txt"
+  grep -q 'OK (1 test)' "artifacts/instrumentation-interaction-$stage.txt"
+  adb pull "/sdcard/Android/data/$package/files/verification-interaction-$stage.png" artifacts/
+done
+curl --fail --silent http://127.0.0.1:4320/control/interaction-stats > artifacts/interaction-stats.json
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+stats = json.loads(Path("artifacts/interaction-stats.json").read_text(encoding="utf-8"))
+assert len(stats["responses"]) == 7
+assert type(stats["responses"][0]["approvalRequestId"]) is int
+assert type(stats["responses"][1]["approvalRequestId"]) is str
+assert len(stats["messageRequests"]) == 3
+assert len(stats["editRequests"]) == 1
+assert stats["postCounts"] == {"respond": 7, "messages": 3, "edit": 1}
+assert stats["openCount"] == 1
+PY
+
 adb logcat -d -s CodexReachVerification:I '*:S' > artifacts/sqlite-results.txt
 python3 - <<'PY'
 import json

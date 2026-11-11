@@ -28,6 +28,10 @@ export class ChatCache {
         PRIMARY KEY (server_id, chat_id, turn_id, item_id)
       );
     `);
+    const columns = (await this.database.query('PRAGMA table_info(cached_messages)')).values ?? [];
+    if (!columns.some(column => column.name === 'metadata')) {
+      await this.database.execute('ALTER TABLE cached_messages ADD COLUMN metadata TEXT');
+    }
   }
 
   async load(serverId: string, chatId: string): Promise<HistoryPage | null> {
@@ -41,6 +45,7 @@ export class ChatCache {
       id: row.turn_id, status: row.status,
       messages: messages.filter(message => message.turn_id === row.turn_id).map((message): Message => ({
         id: message.item_id, kind: message.kind, text: message.text, phase: message.phase,
+        ...(message.metadata ? JSON.parse(message.metadata) : {}),
       })),
     }));
     return { id: chatId, title: chat.title, cwd: chat.cwd, status: chat.status, turns, nextCursor: chat.next_cursor, hasMore: Boolean(chat.has_more) };
@@ -65,8 +70,9 @@ export class ChatCache {
       });
       turn.messages.forEach((message, itemPosition) => entries.push({
         statement: `INSERT INTO cached_messages
-          (server_id, chat_id, turn_id, item_id, position, kind, text, phase) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        values: [...key, turn.id, message.id, itemPosition, message.kind, message.text, message.phase],
+          (server_id, chat_id, turn_id, item_id, position, kind, text, phase, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        values: [...key, turn.id, message.id, itemPosition, message.kind, message.text, message.phase,
+          JSON.stringify({ questions: message.questions, questionReplies: message.questionReplies })],
       }));
     });
     await this.database.executeSet(entries, true);

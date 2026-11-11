@@ -393,6 +393,62 @@ impl Ipc {
         response.get("result").cloned().context("缺少停止任务结果")
     }
 
+    pub async fn respond(&self, id: &str, approval_id: &Value, response: &Value) -> Result<Value> {
+        let view = self.live(id, None).await?;
+        ensure!(
+            view["available"] == true,
+            "会话尚未载入桌面，无法回复确认请求"
+        );
+        let (owner, method, params) = {
+            let subscriptions = self.subscriptions.lock().await;
+            let entry = subscriptions.get(id).context("会话订阅已失效")?;
+            let state = entry.state.as_ref().context("缺少会话快照")?;
+            let (method, params) = response_request(state, id, approval_id, response)?;
+            (entry.owner.clone(), method, params)
+        };
+        let reply = self.request(method, params, Some(&owner), 1).await?;
+        reply.get("result").cloned().context("缺少确认回复结果")
+    }
+
+    pub async fn edit(&self, id: &str, turn_id: &str, prompt: &str) -> Result<Value> {
+        let owner = self
+            .follow(id)
+            .await?
+            .context("会话尚未载入桌面，无法编辑消息")?;
+        self.request(
+            "thread-follower-load-complete-history",
+            json!({"conversationId":id}),
+            Some(&owner),
+            1,
+        )
+        .await?;
+        {
+            let subscriptions = self.subscriptions.lock().await;
+            let state = subscriptions
+                .get(id)
+                .and_then(|entry| entry.state.as_ref())
+                .context("缺少会话快照")?;
+            let editable =
+                crate::model::editable_turn(state).context("当前没有可编辑的最新用户轮次")?;
+            ensure!(
+                editable["turnId"] == turn_id,
+                "待编辑轮次已变化，请刷新对话后重新编辑"
+            );
+        }
+        let reply = self
+            .request(
+                "thread-follower-edit-last-user-turn",
+                json!({
+                    "conversationId":id,"turnId":turn_id,"message":prompt,
+                    "allowEarlierMessages":false,"shouldSendPermissionOverrides":false
+                }),
+                Some(&owner),
+                2,
+            )
+            .await?;
+        reply.get("result").cloned().context("缺少消息编辑结果")
+    }
+
     pub async fn send(
         &self,
         id: &str,
@@ -415,7 +471,10 @@ impl Ipc {
                     .to_owned(),
             )
         };
-        let input = json!([{"type":"text","text":prompt,"text_elements":[]}]);
+        let mut input = vec![json!({"type":"text","text":prompt,"text_elements":[]})];
+        for skill in options["skills"].as_array().into_iter().flatten() {
+            input.push(json!({"type":"skill","name":skill["name"],"path":skill["path"]}));
+        }
         if active {
             self.request(
                 "thread-follower-steer-turn",
@@ -465,6 +524,73 @@ impl Ipc {
     }
 }
 
+fn response_request(
+    state: &Value,
+    conversation_id: &str,
+    approval_id: &Value,
+    response: &Value,
+) -> Result<(&'static str, Value)> {
+    let request = crate::model::pending_requests(state)
+        .into_iter()
+        .find(|request| request["id"] == *approval_id)
+        .context("确认请求已结束或不存在，请刷新当前对话")?;
+    ensure!(request["desktopRequired"] != true, "此请求需要在电脑端处理");
+    let mut params = json!({"conversationId":conversation_id,"requestId":approval_id});
+    let method = match request["method"].as_str() {
+        Some("item/commandExecution/requestApproval" | "item/fileChange/requestApproval") => {
+            let decision = response.get("decision").context("审批回复缺少 decision")?;
+            let file = request["method"] == "item/fileChange/requestApproval";
+            let simple = matches!(
+                decision.as_str(),
+                Some("accept" | "acceptForSession" | "decline" | "cancel")
+            );
+            let amendment = !file
+                && decision.as_object().is_some_and(|object| {
+                    object.len() == 1
+                        && (object.contains_key("acceptWithExecpolicyAmendment")
+                            || object.contains_key("applyNetworkPolicyAmendment"))
+                });
+            ensure!(simple || amendment, "审批 decision 无效");
+            if let Some(available) = request["params"]["availableDecisions"].as_array() {
+                ensure!(available.contains(decision), "该审批不支持所选决定");
+            }
+            params["decision"] = decision.clone();
+            if file {
+                "thread-follower-file-approval-decision"
+            } else {
+                "thread-follower-command-approval-decision"
+            }
+        }
+        Some("item/permissions/requestApproval") => {
+            ensure!(
+                response["permissions"].is_object()
+                    && matches!(response["scope"].as_str(), Some("turn" | "session")),
+                "权限回复需要 permissions 和有效 scope"
+            );
+            params["response"] = response.clone();
+            "thread-follower-permissions-request-approval-response"
+        }
+        Some("item/tool/requestUserInput") => {
+            ensure!(response["answers"].is_object(), "问题回复缺少 answers");
+            params["response"] = response.clone();
+            "thread-follower-submit-user-input"
+        }
+        Some("mcpServer/elicitation/request") => {
+            ensure!(
+                matches!(
+                    response["action"].as_str(),
+                    Some("accept" | "decline" | "cancel")
+                ),
+                "MCP 回复缺少有效 action"
+            );
+            params["response"] = response.clone();
+            "thread-follower-submit-mcp-server-elicitation-response"
+        }
+        _ => bail!("此请求需要在电脑端处理"),
+    };
+    Ok((method, params))
+}
+
 fn apply_change(state: &mut Option<Value>, revision: &mut u64, change: &Value) -> Result<()> {
     let next_revision = change["revision"].as_u64().context("缺少流版本")?;
     if change["type"] == "snapshot" {
@@ -505,6 +631,96 @@ fn apply_change(state: &mut Option<Value>, revision: &mut u64, change: &Value) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_reply_keeps_numeric_id_and_rejects_already_completed_request() {
+        let mut state = json!({"requests":[{"id":19,"method":"item/commandExecution/requestApproval","params":{"availableDecisions":["accept","decline"]}}]});
+        let (method, params) =
+            response_request(&state, "chat", &json!(19), &json!({"decision":"accept"})).unwrap();
+        assert_eq!(method, "thread-follower-command-approval-decision");
+        assert_eq!(params["requestId"], 19);
+        assert!(
+            response_request(&state, "chat", &json!("19"), &json!({"decision":"accept"})).is_err()
+        );
+        assert!(
+            response_request(
+                &state,
+                "chat",
+                &json!(19),
+                &json!({"decision":"acceptForSession"})
+            )
+            .is_err()
+        );
+        state["requests"][0]["completed"] = json!(true);
+        assert!(
+            response_request(&state, "chat", &json!(19), &json!({"decision":"accept"})).is_err()
+        );
+    }
+
+    #[test]
+    fn permission_reply_preserves_requested_structure_and_scope() {
+        let state = json!({"requests":[{"id":"permission","method":"item/permissions/requestApproval","params":{}}]});
+        let response = json!({"permissions":{"network":{"enabled":true},"fileSystem":{"read":["C:/Example"],"write":null}},"scope":"turn"});
+        let (method, params) =
+            response_request(&state, "chat", &json!("permission"), &response).unwrap();
+        assert_eq!(
+            method,
+            "thread-follower-permissions-request-approval-response"
+        );
+        assert_eq!(params["response"], response);
+    }
+
+    #[test]
+    fn user_questions_and_mcp_use_their_own_response_methods() {
+        let state = json!({"requests":[
+            {"id":"input","method":"item/tool/requestUserInput","params":{}},
+            {"id":"mcp","method":"mcpServer/elicitation/request","params":{"mode":"form"}},
+            {"id":"verification","method":"mcpServer/elicitation/request","params":{"mode":"openai/userVerification"}}
+        ]});
+        let (method, params) = response_request(
+            &state,
+            "chat",
+            &json!("input"),
+            &json!({"answers":{"q":{"answers":["A"]}}}),
+        )
+        .unwrap();
+        assert_eq!(method, "thread-follower-submit-user-input");
+        assert_eq!(params["response"]["answers"]["q"]["answers"][0], "A");
+        assert_eq!(
+            response_request(
+                &state,
+                "chat",
+                &json!("mcp"),
+                &json!({"action":"accept","content":{"value":true},"_meta":null})
+            )
+            .unwrap()
+            .0,
+            "thread-follower-submit-mcp-server-elicitation-response"
+        );
+        assert!(
+            response_request(
+                &state,
+                "chat",
+                &json!("verification"),
+                &json!({"action":"accept"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn file_approval_needs_visible_change_details() {
+        let state = json!({"requests":[{"id":"file","method":"item/fileChange/requestApproval","params":{"itemId":"missing"}}]});
+        assert!(
+            response_request(
+                &state,
+                "chat",
+                &json!("file"),
+                &json!({"decision":"accept"})
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn applies_array_edits_and_rejects_missing_revision() {

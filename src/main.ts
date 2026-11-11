@@ -6,7 +6,8 @@ import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
 import { populateParameters, selectedParameters, updateThinking } from './task-options';
-import type { Connection, HistoryPage, LiveView, Message, ModelChoice, Project, Receipt, Thread, TurnOptions } from './types';
+import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
+import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, Skill, Thread, TurnOptions } from './types';
 import './style.css';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -24,6 +25,8 @@ const olderButton = element<HTMLButtonElement>('older-button');
 const stopButton = element<HTMLButtonElement>('stop-button');
 const newDialog = element<HTMLDialogElement>('new-chat-dialog');
 const optionsDialog = element<HTMLDialogElement>('options-dialog');
+const skillsDialog = element<HTMLDialogElement>('skills-dialog');
+const editDialog = element<HTMLDialogElement>('edit-dialog');
 const newModel = element<HTMLSelectElement>('new-chat-model');
 const newThinking = element<HTMLSelectElement>('new-chat-thinking');
 const optionsModel = element<HTMLSelectElement>('options-model');
@@ -53,6 +56,17 @@ let dialogRequest = 0;
 let newFormLoading = false;
 let newFormError = '';
 let optionsChatId = '';
+let skillsChatId = '';
+let skillChoices: Skill[] = [];
+let selectedSkills: Skill[] = [];
+let skillDraft = new Set<string>();
+let liveRequests: PendingRequest[] = [];
+let editableTurn: EditableTurn | null = null;
+let editing: (EditableTurn & { chatId: string }) | null = null;
+type Interaction = { requestId: string; kind: 'respond' | 'edit'; approvalRequestId?: string | number; turnId?: string; prompt?: string; status: string; error?: string };
+let interaction: Interaction | null = null;
+let questionReplies: QuestionReply[] = [];
+let questionDrafts: QuestionReply[] = [];
 type NewChatDraft = { projectId?: string; prompt: string } & TurnOptions;
 type Creation = NewChatDraft & { requestId: string; status?: string; error?: string };
 type StopOperation = { requestId: string; expectedTurnId: string; status?: string; error?: string };
@@ -71,7 +85,7 @@ let generation = 0;
 let foreground = true;
 let liveWaiting = false;
 let liveModel = '';
-let pending: { requestId: string; prompt: string; status?: string; options?: TurnOptions } | null = null;
+let pending: { requestId: string; prompt: string; status?: string; error?: string; options?: TurnOptions; questionReplies?: QuestionReply[] } | null = null;
 let cacheTimer: ReturnType<typeof setTimeout> | undefined;
 let cacheWriting = false;
 const pendingCache = new Map<string, { serverId: string; page: HistoryPage; revision: string | null }>();
@@ -93,6 +107,7 @@ function clearRuntimeStatus(): void {
   runtimeStatus = null;
   activeTurnId = null;
   liveWaiting = false;
+  editableTurn = null;
 }
 
 function showView(view: typeof currentView): void {
@@ -364,6 +379,7 @@ async function openChat(id: string): Promise<void> {
   const token = generation;
   revision = null;
   liveWaiting = false;
+  liveRequests = [];
   liveModel = '';
   historyLoaded = false;
   opening = true;
@@ -376,6 +392,10 @@ async function openChat(id: string): Promise<void> {
   selected = { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
   pending = readStored(storageKey('pending', id));
   stopOperation = readStored(storageKey('stop', id));
+  interaction = readStored(storageKey('interaction', id));
+  selectedSkills = readStored<Skill[]>(storageKey('skills', id)) ?? [];
+  questionReplies = readStored<QuestionReply[]>(storageKey('question-replies', id)) ?? [];
+  questionDrafts = readStored<QuestionReply[]>(storageKey('question-drafts', id)) ?? pending?.questionReplies ?? [];
   turnOptions = readStored<TurnOptions>(storageKey('options', id)) ?? {};
   messageInput.value = localStorage.getItem(storageKey('draft', id)) ?? '';
   localStorage.setItem(storageKey('last-chat'), id);
@@ -394,6 +414,7 @@ async function openChat(id: string): Promise<void> {
     renderChat(true);
     if (pending) void checkReceipt(token).catch(error => { if (token === generation) inform(errorText(error)); });
     if (stopOperation) void checkStopReceipt(token);
+    if (interaction) void checkInteractionReceipt(token);
     void followChat(id, token);
   } catch (error) {
     if (token !== generation) return;
@@ -430,6 +451,7 @@ async function followChat(id: string, token: number): Promise<void> {
         renderChat();
         if (pending) await checkReceipt(token);
         if (stopOperation) await checkStopReceipt(token);
+        if (interaction) await checkInteractionReceipt(token);
         await new Promise(resolve => setTimeout(resolve, 3000));
         continue;
       }
@@ -453,6 +475,9 @@ async function followChat(id: string, token: number): Promise<void> {
       activeTurnId = view.activeTurnId ?? null;
       revision = view.revision ?? null;
       liveWaiting = Boolean(view.waiting);
+      liveRequests = view.requests ?? [];
+      editableTurn = view.editableTurn ?? null;
+      if (interaction?.kind === 'respond' && !liveRequests.some(request => request.id === interaction?.approvalRequestId)) clearInteraction();
       liveModel = view.model ?? '';
       syncing = false;
       settleStopFromRuntime();
@@ -463,6 +488,7 @@ async function followChat(id: string, token: number): Promise<void> {
       previousStatus = selected.status;
       if (pending) await checkReceipt(token);
       if (stopOperation) await checkStopReceipt(token);
+      if (interaction) await checkInteractionReceipt(token);
       await new Promise(resolve => setTimeout(resolve, 120));
     } catch (error) {
       if (token !== generation) return;
@@ -474,7 +500,7 @@ async function followChat(id: string, token: number): Promise<void> {
   }
 }
 
-function renderMessage(message: Message, key: string): HTMLElement {
+function renderMessage(message: Message, key: string, answers: Map<string, string>): HTMLElement {
   let node = renderedMessages.get(key);
   if (!node) {
     node = document.createElement('article');
@@ -489,14 +515,43 @@ function renderMessage(message: Message, key: string): HTMLElement {
       details.append(summary, content);
       node.append(details);
     } else node.append(content);
+    if (message.kind === 'user') {
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'quiet edit-message';
+      edit.textContent = '编辑';
+      edit.addEventListener('click', () => openEdit());
+      node.append(edit);
+    }
     renderedMessages.set(key, node);
   }
-  if (node.dataset.body !== message.text) {
+  const questionText = message.questions?.map(question => [question.title, ...(question.options ?? []).map(option => `- ${option}`)].join('\n')).join('\n\n');
+  const body = message.questionReplies?.length ? message.questionReplies.map(reply => `${reply.question}\n${reply.answer}`).join('\n\n')
+    : questionText === message.text ? '' : message.text;
+  if (node.dataset.body !== body) {
     const content = node.querySelector<HTMLElement>('.message-content')!;
-    if (message.kind === 'user' || message.kind === 'tool') content.textContent = message.text;
-    else content.innerHTML = DOMPurify.sanitize(marked.parse(message.text, { async: false }), { FORBID_TAGS: ['img', 'iframe', 'form'], FORBID_ATTR: ['style'] });
-    node.dataset.body = message.text;
+    content.hidden = !body;
+    if (message.kind === 'user' || message.kind === 'tool') content.textContent = body;
+    else content.innerHTML = DOMPurify.sanitize(marked.parse(body, { async: false }), { FORBID_TAGS: ['img', 'iframe', 'form'], FORBID_ATTR: ['style'] });
+    node.dataset.body = body;
   }
+  const edit = node.querySelector<HTMLButtonElement>('.edit-message');
+  if (edit) {
+    edit.hidden = !editableTurn || key !== `${editableTurn.turnId}:${editableTurn.messageId}`;
+    edit.disabled = !connected || runtimeStatus === 'active' || Boolean(pending) || Boolean(interaction) || Boolean(stopOperation);
+  }
+  if (message.questions?.length) {
+    let questions = node.querySelector<HTMLDivElement>('.async-questions');
+    if (!questions) {
+      questions = document.createElement('div');
+      questions.className = 'async-questions';
+      node.append(questions);
+    }
+    renderAsyncQuestions(questions, message.questions.map((question, index) => {
+      const id = JSON.stringify(['request_user_input_async', message.id, index]);
+      return { ...question, id, answer: answers.get(id), draft: questionDrafts.find(reply => reply.questionItemId === id)?.answer };
+    }), { disabled: !connected || Boolean(pending) || Boolean(interaction) || Boolean(stopOperation), onSubmit: replies => void submitQuestionReplies(replies) });
+  } else node.querySelector('.async-questions')?.remove();
   return node;
 }
 
@@ -521,21 +576,51 @@ function renderChat(forceBottom = false): void {
   element('history-status-text').textContent = loadingText;
   element('empty-history').hidden = hasMessages || opening || syncing || !historyLoaded || Boolean(historyError);
   element('empty-history').textContent = selected.hasMore ? '此页没有可显示的消息，可继续读取更早内容' : '暂无消息';
-  const fragment = document.createDocumentFragment();
+  const messages = element('messages');
+  let position = messages.firstElementChild;
   const keys = new Set<string>();
+  const answers = new Map<string, string>();
+  const acceptedReplies = new Set<string>();
+  for (const turn of selected.turns) {
+    for (const message of turn.messages) {
+      for (const reply of message.questionReplies ?? []) {
+        answers.set(reply.questionItemId, reply.answer);
+        acceptedReplies.add(JSON.stringify([reply.questionItemId, reply.answer]));
+      }
+    }
+  }
+  const repliesAwaitingHistory = questionReplies.filter(reply => !acceptedReplies.has(JSON.stringify([reply.questionItemId, reply.answer])));
+  if (repliesAwaitingHistory.length !== questionReplies.length) {
+    questionReplies = repliesAwaitingHistory;
+    localStorage.setItem(storageKey('question-replies', selected.id), JSON.stringify(questionReplies));
+  }
+  for (const reply of questionReplies) answers.set(reply.questionItemId, reply.answer);
+  const remainingDrafts = questionDrafts.filter(reply => !acceptedReplies.has(JSON.stringify([reply.questionItemId, reply.answer])));
+  if (remainingDrafts.length !== questionDrafts.length) {
+    questionDrafts = remainingDrafts;
+    localStorage.setItem(storageKey('question-drafts', selected.id), JSON.stringify(questionDrafts));
+  }
   for (const turn of selected.turns) {
     for (const message of turn.messages) {
       const key = `${turn.id}:${message.id}`;
       keys.add(key);
-      fragment.append(renderMessage(message, key));
+      const node = renderMessage(message, key, answers);
+      if (node !== position) messages.insertBefore(node, position);
+      position = node.nextElementSibling;
     }
   }
+  while (position) { const next = position.nextElementSibling; position.remove(); position = next; }
   for (const key of renderedMessages.keys()) if (!keys.has(key)) renderedMessages.delete(key);
-  element('messages').replaceChildren(fragment);
+  const requestPending = interaction?.kind === 'respond' ? { [JSON.stringify(interaction.approvalRequestId)]: interaction } : {};
+  renderRequests(element('requests'), liveRequests, {
+    disabled: !connected || runtimeStatus === null || Boolean(interaction), pending: requestPending,
+    canResolve: connected && runtimeStatus !== null,
+    onSubmit: (request, response) => void submitResponse(request, response), onResolve: () => { clearInteraction(); renderChat(); },
+  });
   const activity = element('activity');
-  activity.textContent = liveWaiting ? '等待你在电脑上处理确认' : '正在处理…';
-  activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active');
-  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || !messageInput.value.trim();
+  activity.textContent = runtimeStatus === null && liveRequests.length ? '等待电脑端重新同步请求…' : liveWaiting ? '等待处理请求' : '正在处理…';
+  activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active' && !liveRequests.length);
+  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction) || !messageInput.value.trim();
   sendButton.textContent = runtimeStatus === 'active' ? '追加' : '发送';
   stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
   stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
@@ -545,8 +630,14 @@ function renderChat(forceBottom = false): void {
   element('resolve-stop').hidden = stopOperation?.status !== 'unknown' || !activeTurnId;
   element('parameters-button').textContent = turnOptions.model ? `${turnOptions.model} · ${turnOptions.thinking}` : '沿用会话参数';
   element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
+  element<HTMLButtonElement>('skills-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
+  renderSelectedSkills();
+  element('interaction-note').hidden = !interaction || interaction.kind !== 'edit';
+  element('interaction-status').textContent = interaction?.error ?? '正在确认编辑结果…';
+  element('resolve-interaction').hidden = interaction?.status !== 'unknown';
+  element<HTMLButtonElement>('submit-edit').disabled = Boolean(interaction) || !connected || runtimeStatus === 'active';
   element('delivery-note').hidden = !pending;
-  element('delivery-text').textContent = pending?.status === 'unknown' ? '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
+  element('delivery-text').textContent = pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
   element('resolve-delivery').hidden = pending?.status !== 'unknown';
   if (forceBottom || atBottom) scroll.scrollTop = scroll.scrollHeight;
 }
@@ -592,6 +683,19 @@ async function checkReceipt(token: number): Promise<void> {
       messageInput.style.height = 'auto';
       localStorage.removeItem(storageKey('draft', chatId));
     }
+    if (request.options?.skills?.length) {
+      const sent = new Set(request.options.skills.map(skill => skill.path));
+      selectedSkills = selectedSkills.filter(skill => !sent.has(skill.path));
+      localStorage.setItem(storageKey('skills', chatId), JSON.stringify(selectedSkills));
+    }
+    if (request.questionReplies?.length) {
+      const answered = new Map(questionReplies.map(reply => [reply.questionItemId, reply]));
+      for (const reply of request.questionReplies) answered.set(reply.questionItemId, reply);
+      questionReplies = [...answered.values()];
+      localStorage.setItem(storageKey('question-replies', chatId), JSON.stringify(questionReplies));
+      questionDrafts = questionDrafts.filter(draft => !request.questionReplies!.some(reply => reply.questionItemId === draft.questionItemId && reply.answer === draft.answer));
+      localStorage.setItem(storageKey('question-drafts', chatId), JSON.stringify(questionDrafts));
+    }
     pending = null;
     localStorage.removeItem(storageKey('pending', chatId));
     revision = null;
@@ -599,16 +703,32 @@ async function checkReceipt(token: number): Promise<void> {
     await refreshHistory(chatId, token);
   } else {
     pending.status = receipt.status;
+    pending.error = receipt.error ?? undefined;
     localStorage.setItem(storageKey('pending', chatId), JSON.stringify(pending));
   }
   renderChat();
 }
 
 async function sendMessage(): Promise<void> {
-  if (!selected || !client || !connected || pending || stopOperation || !messageInput.value.trim()) return;
+  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })) });
+}
+
+async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
+  if (!selected || pending || interaction || stopOperation || !connected) return;
+  const drafts = new Map(questionDrafts.map(reply => [reply.questionItemId, reply]));
+  for (const reply of replies) drafts.set(reply.questionItemId, reply);
+  questionDrafts = [...drafts.values()];
+  localStorage.setItem(storageKey('question-drafts', selected.id), JSON.stringify(questionDrafts));
+  const prompt = `<send_user_message_question_reply>\n${JSON.stringify(replies)}\n</send_user_message_question_reply>`;
+  await sendPrompt(prompt, turnOptions, replies);
+}
+
+async function sendPrompt(prompt: string, options: TurnOptions, replies?: QuestionReply[]): Promise<void> {
+  if (!selected || !client || !connected || pending || stopOperation || interaction || !prompt.trim()) return;
   const id = selected.id;
   const token = generation;
-  const request = { requestId: crypto.randomUUID(), prompt: messageInput.value, options: { ...turnOptions } };
+  const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies };
+  inform();
   pending = request;
   localStorage.setItem(storageKey('pending', id), JSON.stringify(request));
   renderChat();
@@ -620,9 +740,8 @@ async function sendMessage(): Promise<void> {
     }
   } catch (error) {
     if (token !== generation) return;
-    if (pending) pending.status = 'unknown';
+    if (pending) { pending.status = 'unknown'; pending.error = `投递结果待确认。${errorText(error)}`; }
     localStorage.setItem(storageKey('pending', id), JSON.stringify(pending));
-    inform(`投递结果待确认。${errorText(error)}`);
     renderChat();
   }
 }
@@ -850,6 +969,7 @@ async function stopTask(): Promise<void> {
   if (!client || !selected || !activeTurnId || runtimeStatus !== 'active' || stopOperation) return;
   const token = generation;
   const id = selected.id;
+  inform();
   stopOperation = { requestId: crypto.randomUUID(), expectedTurnId: activeTurnId, status: 'sending' };
   localStorage.setItem(storageKey('stop', id), JSON.stringify(stopOperation));
   renderChat();
@@ -860,6 +980,172 @@ async function stopTask(): Promise<void> {
     localStorage.setItem(storageKey('stop', id), JSON.stringify(stopOperation));
   }
   if (token === generation) await checkStopReceipt(token);
+}
+
+function renderSelectedSkills(): void {
+  const container = element('selected-skills');
+  container.hidden = !selectedSkills.length;
+  const signature = JSON.stringify([selectedSkills, Boolean(pending)]);
+  if (container.dataset.signature === signature) return;
+  container.dataset.signature = signature;
+  container.replaceChildren();
+  for (const skill of selectedSkills) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'skill-chip';
+    button.textContent = `${skill.name} ×`;
+    button.setAttribute('aria-label', `移除 Skill ${skill.name}`);
+    button.disabled = Boolean(pending);
+    button.addEventListener('click', () => {
+      selectedSkills = selectedSkills.filter(item => item.path !== skill.path);
+      localStorage.setItem(storageKey('skills', selected!.id), JSON.stringify(selectedSkills));
+      renderSelectedSkills();
+    });
+    container.append(button);
+  }
+}
+
+function renderSkillChoices(): void {
+  const query = element<HTMLInputElement>('skills-search').value.trim().toLocaleLowerCase();
+  const list = element('skills-list');
+  list.replaceChildren();
+  for (const skill of skillChoices.filter(item => `${item.name} ${item.description ?? ''}`.toLocaleLowerCase().includes(query))) {
+    const label = document.createElement('label');
+    label.className = 'skill-choice';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = skill.path;
+    checkbox.checked = skillDraft.has(skill.path);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) skillDraft.add(skill.path);
+      else skillDraft.delete(skill.path);
+    });
+    const text = document.createElement('span');
+    const name = document.createElement('strong');
+    name.textContent = skill.name;
+    const description = document.createElement('span');
+    description.className = 'field-note';
+    description.textContent = skill.shortDescription || skill.description || skill.path;
+    text.append(name, description);
+    label.append(checkbox, text);
+    list.append(label);
+  }
+  if (!list.childElementCount) {
+    const empty = document.createElement('p');
+    empty.className = 'field-note';
+    empty.textContent = '没有匹配的 Skill';
+    list.append(empty);
+  }
+}
+
+async function openSkills(): Promise<void> {
+  if (!selected || !client || pending) return;
+  skillsChatId = selected.id;
+  const id = skillsChatId;
+  const token = generation;
+  skillChoices = [];
+  skillDraft = new Set(selectedSkills.map(skill => skill.path));
+  element<HTMLInputElement>('skills-search').value = '';
+  element('skills-list').replaceChildren();
+  element('skills-status').textContent = '正在读取当前项目可用 Skill…';
+  element('open-skill-chat').hidden = true;
+  element<HTMLButtonElement>('save-skills').disabled = true;
+  showFormError('skills-error');
+  skillsDialog.showModal();
+  try {
+    const result = await client.request<{ skills: Skill[]; errors: { message: string }[]; sendingSupported?: boolean }>(`/threads/${encodeURIComponent(id)}/skills`);
+    if (token !== generation || selected?.id !== id || !skillsDialog.open) return;
+    skillChoices = result.skills;
+    renderSkillChoices();
+    element('skills-status').textContent = result.sendingSupported === false ? '此对话尚未在电脑端加载，请在电脑上打开后再发送 Skill。' : '所选 Skill 用于下一次发送。';
+    element('open-skill-chat').hidden = result.sendingSupported !== false;
+    showFormError('skills-error', result.errors.map(error => error.message).join('\n'));
+    element<HTMLButtonElement>('save-skills').disabled = false;
+  } catch (error) {
+    if (token === generation && skillsDialog.open) {
+      element('skills-status').textContent = '';
+      showFormError('skills-error', errorText(error));
+    }
+  }
+}
+
+function openEdit(): void {
+  if (!selected || !editableTurn || runtimeStatus === 'active' || interaction || pending) return;
+  editing = { ...editableTurn, chatId: selected.id };
+  element<HTMLTextAreaElement>('edit-prompt').value = localStorage.getItem(storageKey('edit-draft', `${selected.id}:${editableTurn.turnId}`)) ?? editableTurn.prompt;
+  showFormError('edit-error');
+  editDialog.showModal();
+}
+
+function clearInteraction(): void {
+  interaction = null;
+  if (selected) localStorage.removeItem(storageKey('interaction', selected.id));
+}
+
+async function checkInteractionReceipt(token: number): Promise<void> {
+  const operation = interaction;
+  const id = selected?.id;
+  if (!operation || !id || !client) return;
+  let receipt: Receipt;
+  try { receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(operation.requestId)}`); }
+  catch (error) {
+    if (token !== generation || interaction?.requestId !== operation.requestId) return;
+    if (error instanceof ReachError && error.status === 404) operation.status = 'unknown';
+    operation.error = `操作结果待确认。${errorText(error)}`;
+    localStorage.setItem(storageKey('interaction', id), JSON.stringify(operation));
+    renderChat();
+    return;
+  }
+  if (token !== generation || interaction?.requestId !== operation.requestId) return;
+  operation.status = receipt.status;
+  operation.error = receipt.error ?? undefined;
+  localStorage.setItem(storageKey('interaction', id), JSON.stringify(operation));
+  if (receipt.status === 'accepted' && operation.kind === 'edit') {
+    clearInteraction();
+    localStorage.removeItem(storageKey('edit-draft', `${id}:${operation.turnId}`));
+    historyLoaded = false;
+    revision = null;
+    syncing = true;
+    await refreshHistory(id, token);
+  }
+  renderChat();
+}
+
+async function performInteraction(operation: Interaction, body: Record<string, unknown>): Promise<void> {
+  if (!selected || !client || interaction || !connected) return;
+  const id = selected.id;
+  const token = generation;
+  interaction = operation;
+  inform();
+  localStorage.setItem(storageKey('interaction', id), JSON.stringify(operation));
+  renderChat();
+  try { await client.request(`/threads/${encodeURIComponent(id)}/${operation.kind}`, 'POST', { ...body, requestId: operation.requestId }); }
+  catch (error) {
+    if (token !== generation || interaction?.requestId !== operation.requestId) return;
+    operation.error = `操作结果待确认。${errorText(error)}`;
+    localStorage.setItem(storageKey('interaction', id), JSON.stringify(operation));
+  }
+  while (token === generation && interaction?.requestId === operation.requestId && operation.status === 'sending') {
+    await checkInteractionReceipt(token);
+    if (interaction?.status === 'sending') await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+async function submitResponse(request: PendingRequest, response: unknown): Promise<void> {
+  if (!liveRequests.some(item => item.id === request.id)) return;
+  await performInteraction({ requestId: crypto.randomUUID(), kind: 'respond', approvalRequestId: request.id, status: 'sending' }, { approvalRequestId: request.id, response });
+}
+
+async function submitEdit(): Promise<void> {
+  const prompt = element<HTMLTextAreaElement>('edit-prompt').value;
+  if (!editing || !selected || selected.id !== editing.chatId || !prompt.trim() || interaction) return;
+  if (editableTurn?.turnId !== editing.turnId || runtimeStatus === 'active') {
+    showFormError('edit-error', '当前轮次已变化，请关闭后重新选择可编辑的消息。');
+    return;
+  }
+  const operation: Interaction = { requestId: crypto.randomUUID(), kind: 'edit', turnId: editing.turnId, prompt, status: 'sending' };
+  editDialog.close();
+  await performInteraction(operation, { turnId: operation.turnId, prompt });
 }
 
 element('connection-form').addEventListener('submit', event => { event.preventDefault(); void connect(); });
@@ -884,6 +1170,36 @@ element('resolve-create').addEventListener('click', () => {
   saveNewChatDraft();
 });
 element('parameters-button').addEventListener('click', () => void openParameters());
+element('skills-button').addEventListener('click', () => void openSkills());
+element('open-skill-chat').addEventListener('click', async () => {
+  if (!selected || !client || selected.id !== skillsChatId) return;
+  const id = selected.id;
+  const token = generation;
+  const button = element<HTMLButtonElement>('open-skill-chat');
+  button.disabled = true;
+  try {
+    await client.request(`/threads/${encodeURIComponent(id)}/open`, 'POST', {});
+    if (token !== generation || !skillsDialog.open) return;
+    element('skills-status').textContent = '已在电脑端打开，所选 Skill 用于下一次发送。';
+    button.hidden = true;
+    resumeChat();
+  } catch (error) { if (token === generation) showFormError('skills-error', errorText(error)); }
+  finally { button.disabled = false; }
+});
+element('skills-search').addEventListener('input', renderSkillChoices);
+element('skills-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!selected || selected.id !== skillsChatId || pending) return;
+  selectedSkills = skillChoices.filter(skill => skillDraft.has(skill.path));
+  localStorage.setItem(storageKey('skills', selected.id), JSON.stringify(selectedSkills));
+  skillsDialog.close();
+  renderChat();
+});
+element('edit-form').addEventListener('submit', event => { event.preventDefault(); void submitEdit(); });
+element('edit-prompt').addEventListener('input', () => {
+  if (editing) localStorage.setItem(storageKey('edit-draft', `${editing.chatId}:${editing.turnId}`), element<HTMLTextAreaElement>('edit-prompt').value);
+});
+element('resolve-interaction').addEventListener('click', () => { clearInteraction(); renderChat(); });
 optionsModel.addEventListener('change', () => {
   optionsModel.setCustomValidity('');
   updateThinking(optionsModel, optionsThinking, modelChoices);
@@ -959,7 +1275,7 @@ messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
   messageInput.style.height = 'auto';
   messageInput.style.height = `${Math.min(160, messageInput.scrollHeight)}px`;
-  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || !messageInput.value.trim();
+  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction) || !messageInput.value.trim();
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));
