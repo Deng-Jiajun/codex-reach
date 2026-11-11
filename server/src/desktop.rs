@@ -361,19 +361,32 @@ impl Ipc {
     }
 
     pub async fn send(&self, id: &str, owner: &str, prompt: &str, request_id: &str) -> Result<()> {
-        let active = self
-            .subscriptions
-            .lock()
-            .await
-            .get(id)
-            .and_then(|entry| entry.state.as_ref())
-            .map(|state| state["threadRuntimeStatus"]["type"] == "active")
-            .unwrap_or(false);
+        let (active, cwd) = {
+            let subscriptions = self.subscriptions.lock().await;
+            let state = subscriptions
+                .get(id)
+                .and_then(|entry| entry.state.as_ref())
+                .context("发送前缺少会话快照")?;
+            (
+                state["threadRuntimeStatus"]["type"] == "active",
+                state["cwd"]
+                    .as_str()
+                    .context("会话缺少工作目录")?
+                    .to_owned(),
+            )
+        };
         let input = json!([{"type":"text","text":prompt,"text_elements":[]}]);
         if active {
             self.request(
                 "thread-follower-steer-turn",
-                json!({"conversationId":id,"input":input,"clientUserMessageId":request_id}),
+                json!({"conversationId":id,"input":input,"clientUserMessageId":request_id,"attachments":[],
+                    "restoreMessage":{
+                        "id":request_id,"text":prompt,"cwd":cwd,
+                        "createdAt":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_millis(),
+                        "context":{"prompt":prompt,"addedFiles":[],"fileAttachments":[],"ideContext":null,
+                            "imageAttachments":[],"workspaceRoots":[cwd]}
+                    }
+                }),
                 Some(owner),
                 1,
             )

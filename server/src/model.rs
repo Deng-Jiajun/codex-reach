@@ -41,7 +41,7 @@ fn output_text(value: &Value) -> String {
 fn message(item: &Value) -> Option<Message> {
     let kind = item["type"].as_str()?;
     let (role, body) = match kind {
-        "userMessage" => {
+        "userMessage" | "steeringUserMessage" => {
             let parts = item["content"].as_array()?;
             let body = parts
                 .iter()
@@ -172,5 +172,13 @@ mod tests {
         assert_eq!(view["turns"][0]["id"], "a");
         assert_eq!(view["turns"][1]["messages"][0]["text"], "Visible summary");
         assert!(!view.to_string().contains("private"));
+    }
+
+    #[test]
+    fn displays_an_in_progress_follow_up_as_a_user_message() {
+        let item = json!({"id":"follow-up","type":"steeringUserMessage","content":[{"type":"text","text":"追加输入"}]});
+        let rendered = message(&item).unwrap();
+        assert_eq!(rendered.kind, "user");
+        assert_eq!(rendered.text, "追加输入");
     }
 }
