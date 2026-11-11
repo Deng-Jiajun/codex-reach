@@ -60,3 +60,8 @@ test('a wider live snapshot can extend a turn backwards', () => {
   const result = mergeTail(longTurnPage(['c', 'd'], null).turns, longTurnPage(['b', 'c', 'd', 'e'], null).turns, false);
   assert.deepEqual(result[0].messages.map(message => message.id), ['b', 'c', 'd', 'e']);
 });
+
+test('a wider live snapshot can include turns before the current item page', () => {
+  const result = mergeTail([turn('current')], [turn('earlier'), turn('current'), turn('latest')], false);
+  assert.deepEqual(result.map(item => item.id), ['earlier', 'current', 'latest']);
+});

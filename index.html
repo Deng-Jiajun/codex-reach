@@ -41,6 +41,7 @@
         <div class="inbox-heading">
           <h1>对话</h1>
           <div class="refresh-controls">
+            <button id="new-chat-button" class="quiet icon-button" type="button" aria-label="新建对话"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
             <span id="refresh-status" class="sr-only" role="status" aria-live="polite"></span>
             <button id="refresh-button" class="quiet icon-button" type="button" aria-label="刷新"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8.3 8.3 0 0 1 20 12M4 12a8.3 8.3 0 0 0 13.9 5.9"/></svg></button>
           </div>
@@ -70,12 +71,16 @@
           <span id="chat-error-text"></span>
           <button id="retry-history" class="quiet" type="button">重试</button>
         </div>
+        <p id="history-status" class="loading-status" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="history-status-text"></span></p>
         <div id="messages-scroll" class="messages-scroll">
-          <button id="older-button" class="quiet more" type="button" hidden>读取更早的消息</button>
+          <button id="older-button" class="quiet more" type="button" hidden><span id="older-spinner" class="spinner" aria-hidden="true" hidden></span><span id="older-label">读取更早的消息</span></button>
+          <p id="empty-history" class="empty" hidden>暂无消息</p>
           <div id="messages"></div>
           <p id="activity" class="activity" role="status" hidden></p>
         </div>
         <div class="composer-area">
+          <div class="composer-tools"><button id="parameters-button" class="quiet" type="button">沿用会话参数</button></div>
+          <div id="stop-note" class="delivery-note" hidden><p id="stop-status" role="status"></p><button id="resolve-stop" class="quiet" type="button" hidden>重新停止当前轮次</button></div>
           <div id="delivery-note" class="delivery-note" hidden>
             <p id="delivery-text"></p>
             <button id="resolve-delivery" class="quiet" type="button" hidden>已核对，恢复编辑</button>
@@ -83,10 +88,36 @@
           <form id="message-form" class="composer">
             <label class="sr-only" for="message-input">消息</label>
             <textarea id="message-input" rows="2" placeholder="发送消息" spellcheck="false"></textarea>
+            <button id="stop-button" class="quiet icon-button stop" type="button" aria-label="停止任务" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg></button>
             <button id="send-button" class="send" type="submit">发送</button>
           </form>
         </div>
       </main>
+      <dialog id="new-chat-dialog" class="task-dialog">
+        <div class="dialog-header"><button class="quiet icon-button" type="button" data-close-dialog="new-chat-dialog" aria-label="返回"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><h2>新建对话</h2></div>
+        <form id="new-chat-form">
+          <fieldset id="new-chat-fields">
+            <label>项目<select id="new-chat-project"></select></label>
+            <p id="new-chat-path" class="field-note"></p>
+            <div class="field-pair"><label>模型<select id="new-chat-model"></select></label><label>思考深度<select id="new-chat-thinking"></select></label></div>
+            <label>首条消息<textarea id="new-chat-prompt" rows="5" required placeholder="输入要执行的任务"></textarea></label>
+          </fieldset>
+          <p id="new-chat-status" class="field-note" role="status" hidden></p>
+          <p id="new-chat-error" class="form-error" role="alert" hidden></p>
+          <button id="create-chat-button" class="primary" type="submit">创建并发送</button>
+          <button id="resolve-create" class="quiet" type="button" hidden>已核对会话列表，恢复编辑</button>
+        </form>
+      </dialog>
+      <dialog id="options-dialog" class="task-dialog">
+        <div class="dialog-header"><button class="quiet icon-button" type="button" data-close-dialog="options-dialog" aria-label="返回"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><h2>发送参数</h2></div>
+        <form id="options-form">
+          <p id="options-current" class="field-note"></p>
+          <div class="field-pair"><label>模型<select id="options-model"></select></label><label>思考深度<select id="options-thinking"></select></label></div>
+          <p class="field-note">所选参数用于下一轮。执行中追加沿用当前轮次的参数。</p>
+          <p id="options-error" class="form-error" role="alert" hidden></p>
+          <button id="save-options" class="primary" type="submit">保存</button>
+        </form>
+      </dialog>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

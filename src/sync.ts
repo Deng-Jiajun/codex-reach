@@ -4,7 +4,9 @@ export function mergeTail(current: Turn[], incoming: Turn[], complete: boolean):
   if (complete || !current.length) return incoming;
   if (!incoming.length) return current;
   const boundary = current.findIndex(turn => turn.id === incoming[0].id);
-  if (boundary < 0) return null;
+  if (boundary < 0) {
+    return incoming.some(turn => turn.id === current[0].id) ? incoming : null;
+  }
   const previous = current[boundary].messages;
   const latest = incoming[0].messages;
   let messages = latest;

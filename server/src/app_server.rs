@@ -11,46 +11,49 @@ use tokio::{
 use crate::model;
 
 #[derive(Default)]
-pub struct HistoryReader {
+pub struct AppServerClient {
     session: Mutex<Option<AppServer>>,
 }
 
-impl HistoryReader {
-    pub async fn page(&self, thread_id: &str, cursor: Option<String>) -> Result<Value> {
+impl AppServerClient {
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let mut session = self.session.lock().await;
         let result = timeout(Duration::from_secs(20), async {
             if session.is_none() {
                 *session = Some(AppServer::start().await?);
             }
-            let server = session.as_mut().unwrap();
-            let metadata = server
-                .call(
-                    "thread/read",
-                    json!({"threadId":thread_id,"includeTurns":false}),
-                )
-                .await?;
-            let page = server
-                .call(
-                    "thread/items/list",
-                    json!({
-                        "threadId":thread_id,"cursor":cursor,"limit":100,"sortDirection":"desc"
-                    }),
-                )
-                .await?;
-            let thread = &metadata["thread"];
-            Ok(json!({
-                "id":thread_id,"title":model::text(thread,"name"),"cwd":thread["cwd"],
-                "status":model::status(&thread["status"]),"turns":model::history_turns(&page),
-                "nextCursor":page["nextCursor"],"hasMore":page["nextCursor"].is_string()
-            }))
+            session.as_mut().unwrap().call(method, params).await
         })
         .await
-        .context("读取 Codex 历史超时")
+        .context("读取 Codex 数据超时")
         .and_then(|result| result);
         if result.is_err() {
             *session = None;
         }
         result
+    }
+
+    pub async fn history(&self, thread_id: &str, cursor: Option<String>) -> Result<Value> {
+        let metadata = self
+            .call(
+                "thread/read",
+                json!({"threadId":thread_id,"includeTurns":false}),
+            )
+            .await?;
+        let page = self
+            .call(
+                "thread/items/list",
+                json!({
+                    "threadId":thread_id,"cursor":cursor,"limit":100,"sortDirection":"desc"
+                }),
+            )
+            .await?;
+        let thread = &metadata["thread"];
+        Ok(json!({
+            "id":thread_id,"title":model::text(thread,"name"),"cwd":thread["cwd"],
+            "status":model::status(&thread["status"]),"turns":model::history_turns(&page),
+            "nextCursor":page["nextCursor"],"hasMore":page["nextCursor"].is_string()
+        }))
     }
 }
 
@@ -78,10 +81,10 @@ impl AppServer {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .context("无法启动 Codex 历史读取进程，请确认 codex 命令可用")?;
+            .context("无法启动 Codex 数据读取进程，请确认 codex 命令可用")?;
         let mut server = Self {
-            input: child.stdin.take().context("缺少历史读取输入管道")?,
-            output: BufReader::new(child.stdout.take().context("缺少历史读取输出管道")?),
+            input: child.stdin.take().context("缺少数据读取输入管道")?,
+            output: BufReader::new(child.stdout.take().context("缺少数据读取输出管道")?),
             _child: child,
             sequence: 0,
         };
@@ -89,7 +92,7 @@ impl AppServer {
             .call(
                 "initialize",
                 json!({
-                    "clientInfo":{"name":"codex_reach_history","version":env!("CARGO_PKG_VERSION")},
+                    "clientInfo":{"name":"codex_reach_read","version":env!("CARGO_PKG_VERSION")},
                     "capabilities":{"experimentalApi":true}
                 }),
             )
@@ -115,7 +118,7 @@ impl AppServer {
             let mut line = String::new();
             ensure!(
                 self.output.read_line(&mut line).await? > 0,
-                "Codex 历史读取进程已退出"
+                "Codex 数据读取进程已退出"
             );
             let response: Value = serde_json::from_str(&line)?;
             if response.get("method").is_some() {
@@ -132,14 +135,14 @@ impl AppServer {
             }
             if let Some(error) = response.get("error") {
                 bail!(
-                    "Codex 历史读取失败（RPC {}），请重新加载对话",
+                    "Codex 数据读取失败（RPC {}），请重新加载对话",
                     error["code"]
                 );
             }
             return response
                 .get("result")
                 .cloned()
-                .context("Codex 历史响应缺少结果");
+                .context("Codex 数据响应缺少结果");
         }
     }
 }

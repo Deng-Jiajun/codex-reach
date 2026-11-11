@@ -1,5 +1,5 @@
+mod app_server;
 mod desktop;
-mod history;
 mod model;
 mod outbox;
 
@@ -39,7 +39,7 @@ struct Config {
 struct AppState {
     config: Config,
     tools: AppTools,
-    history: history::HistoryReader,
+    app_server: app_server::AppServerClient,
     ipc: Mutex<Option<Arc<Ipc>>>,
     outbox: Outbox,
     send_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -59,7 +59,13 @@ impl AppState {
         Ok(client)
     }
 
-    async fn dispatch(&self, chat_id: &str, prompt: &str, request_id: &str) -> Result<()> {
+    async fn dispatch(
+        &self,
+        chat_id: &str,
+        prompt: &str,
+        request_id: &str,
+        options: &model::TurnOptions,
+    ) -> Result<Value> {
         let gate = self
             .send_locks
             .lock()
@@ -73,15 +79,23 @@ impl AppState {
             && view["available"] == true
             && let Some(owner) = client.follow(chat_id).await?
         {
-            return client.send(chat_id, &owner, prompt, request_id).await;
+            client
+                .send(
+                    chat_id,
+                    &owner,
+                    prompt,
+                    request_id,
+                    &serde_json::to_value(options)?,
+                )
+                .await?;
+            return Ok(Value::Null);
         }
-        self.tools
-            .call(
-                "send_message_to_thread",
-                json!({"threadId":chat_id,"hostId":"local","prompt":prompt}),
-            )
-            .await?;
-        Ok(())
+        let mut arguments = serde_json::to_value(options)?;
+        arguments["threadId"] = json!(chat_id);
+        arguments["hostId"] = json!("local");
+        arguments["prompt"] = json!(prompt);
+        self.tools.call("send_message_to_thread", arguments).await?;
+        Ok(Value::Null)
     }
 }
 
@@ -141,6 +155,151 @@ async fn projects(State(state): State<Arc<AppState>>) -> Result<Json<Value>, Api
     Ok(Json(json!({"projects":projects})))
 }
 
+async fn models(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
+    let mut models = Vec::new();
+    let mut cursor = Value::Null;
+    loop {
+        let page = state
+            .app_server
+            .call(
+                "model/list",
+                json!({
+                    "limit":100,"includeHidden":false,"cursor":cursor
+                }),
+            )
+            .await?;
+        models.extend(page["data"].as_array().into_iter().flatten().cloned());
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+    Ok(Json(json!({"models":models})))
+}
+
+async fn thread_settings(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if let Ok(client) = state.ipc().await
+        && let Some(settings) = client.read_settings(&id).await?
+    {
+        return Ok(Json(
+            json!({"model":settings["model"],"thinking":settings["reasoningEffort"]}),
+        ));
+    }
+    let metadata = state
+        .app_server
+        .call("thread/read", json!({"threadId":id,"includeTurns":false}))
+        .await?;
+    Ok(Json(
+        json!({"model":metadata["thread"]["model"],"thinking":metadata["thread"]["reasoningEffort"]}),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRequest {
+    request_id: String,
+    prompt: String,
+    project_id: Option<String>,
+    #[serde(flatten)]
+    options: model::TurnOptions,
+}
+
+async fn create_thread(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<CreateRequest>,
+) -> Result<(StatusCode, Json<Receipt>), ApiError> {
+    if input.prompt.trim().is_empty() || Uuid::parse_str(&input.request_id).is_err() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "首条消息和有效的请求标识为必填项".to_owned(),
+        ));
+    }
+    let mut options = serde_json::to_value(&input.options).map_err(anyhow::Error::from)?;
+    options["projectId"] = json!(input.project_id);
+    let (receipt, fresh) = state
+        .outbox
+        .reserve(&input.request_id, "create", "", &input.prompt, &options)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    if fresh {
+        tokio::spawn(async move {
+            let result = async {
+                let target = if let Some(project_id) = input.project_id {
+                    let projects = state.tools.call("list_projects", json!({})).await?;
+                    ensure!(
+                        projects["projects"].as_array().into_iter().flatten().any(
+                            |project| project["projectId"] == project_id
+                                && project["projectKind"] == "local"
+                                && project["hostId"] == "local"
+                        ),
+                        "所选本机项目已不可用，请刷新项目列表"
+                    );
+                    json!({"type":"project","projectId":project_id,"environment":{"type":"local"}})
+                } else {
+                    json!({"type":"projectless"})
+                };
+                let mut arguments = serde_json::to_value(&input.options)?;
+                arguments["prompt"] = json!(input.prompt);
+                arguments["target"] = target;
+                let result = state.tools.call("create_thread", arguments).await?;
+                ensure!(
+                    result["threadId"].as_str().is_some_and(|id| !id.is_empty()),
+                    "桌面尚未返回新会话标识，请先核对会话列表"
+                );
+                Ok(result)
+            }
+            .await;
+            if state.outbox.finish(&input.request_id, result).is_err() {
+                eprintln!("无法保存新建会话的结果，请检查本地操作数据库");
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StopRequest {
+    request_id: String,
+    expected_turn_id: String,
+}
+
+async fn stop_thread(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<StopRequest>,
+) -> Result<(StatusCode, Json<Receipt>), ApiError> {
+    if Uuid::parse_str(&input.request_id).is_err() || input.expected_turn_id.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "停止请求需要有效标识和当前轮次".to_owned(),
+        ));
+    }
+    let options = json!({"expectedTurnId":input.expected_turn_id});
+    let (receipt, fresh) = state
+        .outbox
+        .reserve(&input.request_id, "stop", &id, "", &options)
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    if fresh {
+        tokio::spawn(async move {
+            let result = async {
+                state
+                    .ipc()
+                    .await?
+                    .interrupt(&id, &input.expected_turn_id)
+                    .await
+            }
+            .await;
+            if state.outbox.finish(&input.request_id, result).is_err() {
+                eprintln!("无法保存停止请求的结果，请检查本地操作数据库");
+            }
+        });
+    }
+    Ok((StatusCode::ACCEPTED, Json(receipt)))
+}
+
 #[derive(Deserialize)]
 struct PageQuery {
     cursor: Option<String>,
@@ -171,8 +330,8 @@ async fn history(
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
     state
-        .history
-        .page(&id, query.cursor)
+        .app_server
+        .history(&id, query.cursor)
         .await
         .map(Json)
         .map_err(|error| ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))
@@ -197,6 +356,8 @@ async fn live(
 struct SendRequest {
     request_id: String,
     prompt: String,
+    #[serde(flatten)]
+    options: model::TurnOptions,
 }
 
 async fn send(
@@ -212,11 +373,19 @@ async fn send(
     }
     let (receipt, fresh) = state
         .outbox
-        .reserve(&input.request_id, &id, &input.prompt)
+        .reserve(
+            &input.request_id,
+            "send",
+            &id,
+            &input.prompt,
+            &serde_json::to_value(&input.options).map_err(anyhow::Error::from)?,
+        )
         .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
     if fresh {
         tokio::spawn(async move {
-            let result = state.dispatch(&id, &input.prompt, &input.request_id).await;
+            let result = state
+                .dispatch(&id, &input.prompt, &input.request_id, &input.options)
+                .await;
             if state.outbox.finish(&input.request_id, result).is_err() {
                 eprintln!("无法保存投递结果，请检查本地发送数据库");
             }
@@ -329,7 +498,7 @@ async fn main() -> Result<()> {
             pipe_path: config.app_tools_pipe.clone(),
         },
         ipc: Mutex::new(None),
-        history: history::HistoryReader::default(),
+        app_server: app_server::AppServerClient::default(),
         outbox: Outbox::open(&directory.join("outbox.db"))?,
         send_locks: Mutex::new(HashMap::new()),
         config,
@@ -348,8 +517,11 @@ async fn main() -> Result<()> {
     let api = Router::new()
         .route("/status", get(status))
         .route("/projects", get(projects))
-        .route("/threads", get(threads))
+        .route("/models", get(models))
+        .route("/threads", get(threads).post(create_thread))
         .route("/threads/{id}/history", get(history))
+        .route("/threads/{id}/settings", get(thread_settings))
+        .route("/threads/{id}/stop", post(stop_thread))
         .route("/threads/{id}/live", get(live))
         .route("/threads/{id}/messages", post(send))
         .route("/requests/{id}", get(receipt))

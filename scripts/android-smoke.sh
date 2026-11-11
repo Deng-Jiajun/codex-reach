@@ -51,6 +51,15 @@ done
 curl --fail --silent http://127.0.0.1:4320/control/stats > artifacts/chat-stats.json
 python3 -c 'import json; from pathlib import Path; assert json.loads(Path("artifacts/chat-stats.json").read_text(encoding="utf-8"))["sends"] == 1'
 
+adb shell am force-stop "$package"
+adb shell am instrument -w -r \
+  -e class io.github.dengjiajun.codexreach.TaskFlowTest \
+  "$package.test/androidx.test.runner.AndroidJUnitRunner" \
+  | tee artifacts/instrumentation-task-flow.txt
+grep -q 'OK (1 test)' artifacts/instrumentation-task-flow.txt
+adb pull "/sdcard/Android/data/$package/files/verification-task-flow.png" artifacts/
+curl --fail --silent http://127.0.0.1:4320/control/stats > artifacts/task-stats.json
+
 adb logcat -d -s CodexReachVerification:I '*:S' > artifacts/sqlite-results.txt
 python3 - <<'PY'
 import json

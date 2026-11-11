@@ -1,5 +1,13 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+pub struct TurnOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,7 +73,11 @@ fn message(item: &Value) -> Option<Message> {
             ("reasoning", body)
         }
         "functionCallOutput"
-            if item["namespace"] == "codex_app" && item["name"] == "send_message_to_thread" =>
+            if item["namespace"] == "codex_app"
+                && matches!(
+                    item["name"].as_str(),
+                    Some("send_message_to_thread" | "create_thread")
+                ) =>
         {
             let output = output_text(&item["output"]);
             let body = output
@@ -176,6 +188,11 @@ pub fn stream_view(state: &Value) -> Value {
             .map(turn)
             .collect()
     };
+    let active_turn_id = turns
+        .iter()
+        .rev()
+        .find(|turn| turn.status == "inProgress")
+        .map(|turn| turn.id.clone());
     let complete = history["isComplete"].as_bool().unwrap_or(false);
     let recent = turns.len().saturating_sub(10);
     turns.drain(..recent);
@@ -192,7 +209,9 @@ pub fn stream_view(state: &Value) -> Value {
         "turns": turns,
         "complete": complete && !truncated,
         "status": status(&state["threadRuntimeStatus"]),
+        "activeTurnId": active_turn_id,
         "model": state["latestModel"],
+        "title": state["title"],
         "waiting": state["requests"].as_array().map(|requests| !requests.is_empty()).unwrap_or(false)
     })
 }
@@ -252,5 +271,22 @@ mod tests {
         assert_eq!(view["turns"][0]["messages"].as_array().unwrap().len(), 100);
         assert_eq!(view["turns"][0]["messages"][0]["id"], "50");
         assert_eq!(view["complete"], false);
+    }
+
+    #[test]
+    fn identifies_the_running_turn_before_any_visible_message_exists() {
+        let view =
+            stream_view(&json!({"turns":[{"id":"running","status":"inProgress","items":[]}]}));
+        assert_eq!(view["activeTurnId"], "running");
+        assert!(view["turns"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn displays_the_initial_prompt_created_through_the_desktop_tool() {
+        let item = json!({"type":"functionCallOutput","id":"initial","namespace":"codex_app","name":"create_thread",
+            "output":"<codex_delegation><source_thread_id>source</source_thread_id><input>first prompt</input></codex_delegation>"});
+        let message = message(&item).unwrap();
+        assert_eq!(message.kind, "user");
+        assert_eq!(message.text, "first prompt");
     }
 }

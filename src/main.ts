@@ -5,7 +5,8 @@ import { marked } from 'marked';
 import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
-import type { Connection, HistoryPage, LiveView, Message, Project, Receipt, Thread } from './types';
+import { populateParameters, selectedParameters, updateThinking } from './task-options';
+import type { Connection, HistoryPage, LiveView, Message, ModelChoice, Project, Receipt, Thread, TurnOptions } from './types';
 import './style.css';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -20,6 +21,13 @@ const searchInput = element<HTMLInputElement>('thread-search');
 const messageInput = element<HTMLTextAreaElement>('message-input');
 const sendButton = element<HTMLButtonElement>('send-button');
 const olderButton = element<HTMLButtonElement>('older-button');
+const stopButton = element<HTMLButtonElement>('stop-button');
+const newDialog = element<HTMLDialogElement>('new-chat-dialog');
+const optionsDialog = element<HTMLDialogElement>('options-dialog');
+const newModel = element<HTMLSelectElement>('new-chat-model');
+const newThinking = element<HTMLSelectElement>('new-chat-thinking');
+const optionsModel = element<HTMLSelectElement>('options-model');
+const optionsThinking = element<HTMLSelectElement>('options-thinking');
 const scroll = element<HTMLDivElement>('messages-scroll');
 const cache = new ChatCache();
 const renderedMessages = new Map<string, HTMLElement>();
@@ -32,6 +40,25 @@ let connectionError = '';
 let historyError = '';
 let streamError = '';
 let historyLoaded = false;
+let opening = false;
+let syncing = false;
+let olderLoading = false;
+let moreLoading = false;
+let historyRequest = 0;
+let runtimeStatus: string | null = null;
+let activeTurnId: string | null = null;
+let turnOptions: TurnOptions = {};
+let modelChoices: ModelChoice[] = [];
+let dialogRequest = 0;
+let newFormLoading = false;
+let newFormError = '';
+let optionsChatId = '';
+type NewChatDraft = { projectId?: string; prompt: string } & TurnOptions;
+type Creation = NewChatDraft & { requestId: string; status?: string; error?: string };
+type StopOperation = { requestId: string; expectedTurnId: string; status?: string; error?: string };
+let creation: Creation | null = null;
+let creationPolling: { key: string; client: ReachClient } | null = null;
+let stopOperation: StopOperation | null = null;
 let connection = readStored<Connection>('codex-reach-connection');
 let client = connection ? new ReachClient(connection) : null;
 let connected = false;
@@ -44,7 +71,7 @@ let generation = 0;
 let foreground = true;
 let liveWaiting = false;
 let liveModel = '';
-let pending: { requestId: string; prompt: string; status?: string } | null = null;
+let pending: { requestId: string; prompt: string; status?: string; options?: TurnOptions } | null = null;
 let cacheTimer: ReturnType<typeof setTimeout> | undefined;
 let cacheWriting = false;
 const pendingCache = new Map<string, { serverId: string; page: HistoryPage; revision: string | null }>();
@@ -59,7 +86,13 @@ function errorText(error: unknown): string { return error instanceof Error ? err
 function inform(text = ''): void { notice.textContent = text; notice.hidden = !text; }
 function storageKey(kind: string, id = ''): string { return `codex-reach-${kind}:${connection?.serverId}:${id}`; }
 function stateLabel(status: string): string {
-  return ({ active: '进行中', inProgress: '进行中', idle: '空闲', notLoaded: '未加载', completed: '已完成', failed: '失败', interrupted: '已停止', systemError: '异常' } as Record<string, string>)[status] ?? status;
+  return ({ active: '进行中', inProgress: '进行中', idle: '空闲', completed: '已完成', failed: '失败', interrupted: '已停止', systemError: '异常' } as Record<string, string>)[status] ?? '';
+}
+
+function clearRuntimeStatus(): void {
+  runtimeStatus = null;
+  activeTurnId = null;
+  liveWaiting = false;
 }
 
 function showView(view: typeof currentView): void {
@@ -80,6 +113,7 @@ function renderConnection(): void {
   }
   element('reconnect-notice').hidden = !connection || connected || currentView === 'connection';
   element('reconnect-text').textContent = `正在重连，当前内容和草稿已保留。${connectionError}`;
+  element<HTMLButtonElement>('new-chat-button').disabled = !connected;
 }
 
 function stopUpdates(): void {
@@ -89,15 +123,21 @@ function stopUpdates(): void {
   refreshButton.disabled = false;
   refreshButton.setAttribute('aria-label', '刷新');
   refreshButton.removeAttribute('aria-busy');
+  opening = false;
+  olderLoading = false;
+  moreLoading = false;
 }
 
 function resumeChat(): void {
   if (!selected || !foreground) return;
   stopUpdates();
   revision = null;
+  clearRuntimeStatus();
+  syncing = true;
+  renderChat();
   const id = selected.id;
   const token = generation;
-  void updateHistory(id, token).then(() => {
+  void refreshHistory(id, token).then(() => {
     if (token === generation) void followChat(id, token);
   });
 }
@@ -170,6 +210,7 @@ async function connect(): Promise<void> {
       showView('inbox');
       void refreshInbox();
     }
+    void resumeCreation();
   } catch (error) {
     if (attempt !== connectionAttempt) return;
     inform(errorText(error));
@@ -219,6 +260,7 @@ async function refreshInbox(): Promise<void> {
     connectionError = '';
     if (notice.textContent?.startsWith('列表读取失败')) inform();
     element('refresh-status').textContent = `已刷新 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+    void resumeCreation();
   } catch (error) {
     if (token !== generation) return;
     await checkConnectionAfterError(error, token);
@@ -254,7 +296,7 @@ function renderInbox(): void {
     metadata.className = 'thread-meta';
     const project = projects.find(item => item.id === thread.projectId);
     const date = new Date(thread.updatedAt * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
-    metadata.textContent = `${project?.name ?? '无项目'} · ${date} · ${stateLabel(thread.status)}`;
+    metadata.textContent = [project?.name ?? '无项目', date, stateLabel(thread.status)].filter(Boolean).join(' · ');
     button.append(title, metadata);
     button.addEventListener('click', () => void openChat(thread.id));
     fragment.append(button);
@@ -267,13 +309,21 @@ function renderInbox(): void {
   }
   element('thread-list').replaceChildren(fragment);
   element('more-threads').hidden = !nextThreads;
+  element<HTMLButtonElement>('more-threads').disabled = moreLoading || !connected;
 }
 
 async function refreshHistory(id: string, token: number): Promise<void> {
   if (!client) return;
-  const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(id)}/history`);
-  if (token !== generation || selected?.id !== id) return;
-  if (page.status === 'notLoaded' && selected.status) page.status = selected.status;
+  const request = ++historyRequest;
+  const revisionAtStart = revision;
+  const currentRequest = () => token === generation && selected?.id === id && request === historyRequest && revision === revisionAtStart;
+  let page: HistoryPage;
+  try { page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(id)}/history`); }
+  catch (error) {
+    if (currentRequest()) await reportReadError(error, token, 'history', currentRequest);
+    return;
+  }
+  if (!currentRequest() || !selected) return;
   const current = historyLoaded ? selected : { ...selected, turns: [], hasMore: false, nextCursor: null };
   selected = mergeHistory(current, page);
   historyLoaded = true;
@@ -284,32 +334,29 @@ async function refreshHistory(id: string, token: number): Promise<void> {
   scheduleCache();
 }
 
-async function checkConnectionAfterError(error: unknown, token: number): Promise<void> {
+async function checkConnectionAfterError(error: unknown, token: number, currentRequest: () => boolean = () => true): Promise<void> {
   let reachable = false;
   let failure = error;
   if (client && error instanceof ReachError && error.status !== 401) {
     try { await client.request('/status'); reachable = true; }
     catch (statusError) { failure = statusError; }
   }
-  if (token !== generation) return;
+  if (token !== generation || !currentRequest()) return;
   connected = reachable;
   connectionError = reachable ? '' : errorText(failure);
   renderConnection();
 }
 
-async function reportReadError(error: unknown, token: number, kind: 'history' | 'stream'): Promise<void> {
-  await checkConnectionAfterError(error, token);
-  if (token !== generation) return;
+async function reportReadError(error: unknown, token: number, kind: 'history' | 'stream', currentRequest: () => boolean = () => true): Promise<void> {
+  await checkConnectionAfterError(error, token, currentRequest);
+  if (token !== generation || !currentRequest()) return;
   if (connected) {
     if (kind === 'history') historyError = `历史读取失败。${errorText(error)}`;
     else streamError = `实时更新失败。${errorText(error)}`;
   }
+  syncing = false;
+  if (!connected || kind === 'stream') clearRuntimeStatus();
   renderChat();
-}
-
-async function updateHistory(id: string, token: number): Promise<void> {
-  try { await refreshHistory(id, token); }
-  catch (error) { await reportReadError(error, token, 'history'); }
 }
 
 async function openChat(id: string): Promise<void> {
@@ -319,33 +366,42 @@ async function openChat(id: string): Promise<void> {
   liveWaiting = false;
   liveModel = '';
   historyLoaded = false;
+  opening = true;
+  syncing = true;
+  clearRuntimeStatus();
   historyError = '';
   streamError = '';
   renderedMessages.clear();
   const thread = threads.find(item => item.id === id);
   selected = { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
   pending = readStored(storageKey('pending', id));
+  stopOperation = readStored(storageKey('stop', id));
+  turnOptions = readStored<TurnOptions>(storageKey('options', id)) ?? {};
   messageInput.value = localStorage.getItem(storageKey('draft', id)) ?? '';
   localStorage.setItem(storageKey('last-chat'), id);
   showView('chat');
   renderChat(true);
   try {
-    const saved = connection ? await cache.load(connection.serverId, id) : null;
+    const saved = connection ? await cache.load(connection.serverId, id).catch(error => {
+      if (token === generation) inform(`本地缓存读取失败。${errorText(error)}`);
+      return null;
+    }) : null;
     if (token !== generation) return;
     if (saved) { selected = saved; renderChat(true); }
     await refreshHistory(id, token);
     if (token !== generation) return;
-    connected = true;
-    connectionError = '';
-    inform();
+    if (connected && !historyError) inform();
     renderChat(true);
-    if (pending) void checkReceipt(token).catch(error => inform(errorText(error)));
+    if (pending) void checkReceipt(token).catch(error => { if (token === generation) inform(errorText(error)); });
+    if (stopOperation) void checkStopReceipt(token);
     void followChat(id, token);
   } catch (error) {
     if (token !== generation) return;
     await reportReadError(error, token, 'history');
     if (token !== generation) return;
     void followChat(id, token);
+  } finally {
+    if (token === generation) { opening = false; renderChat(); }
   }
 }
 
@@ -360,35 +416,53 @@ async function followChat(id: string, token: number): Promise<void> {
       connected = true;
       connectionError = '';
       streamError = '';
+      if (wasDisconnected) { syncing = true; void resumeCreation(); }
       if (wasDisconnected && !historyError) {
-        await updateHistory(id, token);
+        await refreshHistory(id, token);
         if (token !== generation || !selected) return;
       }
       if (!view.available) {
-        if (!historyError) await updateHistory(id, token);
+        if (!historyError) await refreshHistory(id, token);
         if (token !== generation) return;
+        clearRuntimeStatus();
+        syncing = false;
+        settleStopFromRuntime();
         renderChat();
         if (pending) await checkReceipt(token);
+        if (stopOperation) await checkStopReceipt(token);
         await new Promise(resolve => setTimeout(resolve, 3000));
         continue;
       }
       let merged = mergeTail(selected.turns, view.turns ?? [], Boolean(view.complete));
       if (!merged) {
-        if (!historyError) await updateHistory(id, token);
+        if (!historyError) await refreshHistory(id, token);
         if (token !== generation || !selected) return;
         merged = mergeTail(selected.turns, view.turns ?? [], Boolean(view.complete));
       }
-      if (merged) selected.turns = merged;
+      if (!merged) {
+        syncing = true;
+        revision = null;
+        renderChat();
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      selected.turns = merged;
+      if (view.title) selected.title = view.title;
       selected.status = view.status ?? selected.status;
+      runtimeStatus = view.status ?? null;
+      activeTurnId = view.activeTurnId ?? null;
       revision = view.revision ?? null;
       liveWaiting = Boolean(view.waiting);
       liveModel = view.model ?? '';
+      syncing = false;
+      settleStopFromRuntime();
       renderChat();
       scheduleCache();
-      if (previousStatus === 'active' && selected.status !== 'active') await updateHistory(id, token);
+      if (previousStatus === 'active' && selected.status !== 'active') await refreshHistory(id, token);
       if (token !== generation) return;
       previousStatus = selected.status;
       if (pending) await checkReceipt(token);
+      if (stopOperation) await checkStopReceipt(token);
       await new Promise(resolve => setTimeout(resolve, 120));
     } catch (error) {
       if (token !== generation) return;
@@ -432,12 +506,21 @@ function renderChat(forceBottom = false): void {
   element('chat-title').textContent = selected.title || '未命名对话';
   element('chat-title').title = selected.title || '未命名对话';
   element('chat-meta').textContent = [selected.cwd, liveModel].filter(Boolean).join(' · ');
-  element('chat-state').textContent = stateLabel(selected.status);
+  element('chat-state').textContent = stateLabel(runtimeStatus ?? '');
   element('chat-error').hidden = !historyError && !streamError;
   element('chat-error-text').textContent = [historyError, streamError].filter(Boolean).join(' ');
   renderConnection();
   olderButton.hidden = !selected.hasMore;
-  olderButton.disabled = !connected;
+  olderButton.disabled = !connected || olderLoading || syncing;
+  olderButton.setAttribute('aria-busy', String(olderLoading));
+  element('older-spinner').hidden = !olderLoading;
+  element('older-label').textContent = olderLoading ? '正在读取更早的消息…' : '读取更早的消息';
+  const hasMessages = selected.turns.some(turn => turn.messages.length > 0);
+  const loadingText = opening && !hasMessages ? '正在读取对话…' : syncing && connected ? '正在同步最新消息…' : '';
+  element('history-status').hidden = !loadingText || Boolean(historyError) || Boolean(streamError);
+  element('history-status-text').textContent = loadingText;
+  element('empty-history').hidden = hasMessages || opening || syncing || !historyLoaded || Boolean(historyError);
+  element('empty-history').textContent = selected.hasMore ? '此页没有可显示的消息，可继续读取更早内容' : '暂无消息';
   const fragment = document.createDocumentFragment();
   const keys = new Set<string>();
   for (const turn of selected.turns) {
@@ -451,9 +534,17 @@ function renderChat(forceBottom = false): void {
   element('messages').replaceChildren(fragment);
   const activity = element('activity');
   activity.textContent = liveWaiting ? '等待你在电脑上处理确认' : '正在处理…';
-  activity.hidden = !connected || (!liveWaiting && selected.status !== 'active');
-  sendButton.disabled = !connected || Boolean(pending) || !messageInput.value.trim();
-  sendButton.textContent = selected.status === 'active' ? '追加' : '发送';
+  activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active');
+  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || !messageInput.value.trim();
+  sendButton.textContent = runtimeStatus === 'active' ? '追加' : '发送';
+  stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
+  stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
+  stopButton.setAttribute('aria-label', stopOperation ? '正在停止' : '停止任务');
+  element('stop-note').hidden = !stopOperation;
+  element('stop-status').textContent = stopOperation?.error ?? (stopOperation?.status === 'accepted' ? '已请求停止，正在等待轮次结束…' : '正在确认停止结果…');
+  element('resolve-stop').hidden = stopOperation?.status !== 'unknown' || !activeTurnId;
+  element('parameters-button').textContent = turnOptions.model ? `${turnOptions.model} · ${turnOptions.thinking}` : '沿用会话参数';
+  element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
   element('delivery-note').hidden = !pending;
   element('delivery-text').textContent = pending?.status === 'unknown' ? '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
   element('resolve-delivery').hidden = pending?.status !== 'unknown';
@@ -504,7 +595,8 @@ async function checkReceipt(token: number): Promise<void> {
     pending = null;
     localStorage.removeItem(storageKey('pending', chatId));
     revision = null;
-    await updateHistory(chatId, token);
+    syncing = true;
+    await refreshHistory(chatId, token);
   } else {
     pending.status = receipt.status;
     localStorage.setItem(storageKey('pending', chatId), JSON.stringify(pending));
@@ -513,15 +605,15 @@ async function checkReceipt(token: number): Promise<void> {
 }
 
 async function sendMessage(): Promise<void> {
-  if (!selected || !client || !connected || pending || !messageInput.value.trim()) return;
+  if (!selected || !client || !connected || pending || stopOperation || !messageInput.value.trim()) return;
   const id = selected.id;
   const token = generation;
-  const request = { requestId: crypto.randomUUID(), prompt: messageInput.value };
+  const request = { requestId: crypto.randomUUID(), prompt: messageInput.value, options: { ...turnOptions } };
   pending = request;
   localStorage.setItem(storageKey('pending', id), JSON.stringify(request));
   renderChat();
   try {
-    await client.request(`/threads/${encodeURIComponent(id)}/messages`, 'POST', request);
+    await client.request(`/threads/${encodeURIComponent(id)}/messages`, 'POST', { requestId: request.requestId, prompt: request.prompt, ...request.options });
     while (token === generation && pending?.requestId === request.requestId && pending.status !== 'unknown') {
       await checkReceipt(token);
       if (pending) await new Promise(resolve => setTimeout(resolve, 500));
@@ -535,7 +627,282 @@ async function sendMessage(): Promise<void> {
   }
 }
 
+function showFormError(id: string, text = ''): void {
+  const node = element(id);
+  node.textContent = text;
+  node.hidden = !text;
+}
+
+function newChatDraft(): NewChatDraft {
+  return {
+    projectId: element<HTMLSelectElement>('new-chat-project').value || undefined,
+    prompt: element<HTMLTextAreaElement>('new-chat-prompt').value,
+    ...selectedParameters(newModel, newThinking),
+  };
+}
+
+function saveNewChatDraft(): void {
+  if (!creation && connection) localStorage.setItem(storageKey('new-chat-draft'), JSON.stringify(newChatDraft()));
+  const project = projects.find(item => item.id === element<HTMLSelectElement>('new-chat-project').value);
+  element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
+}
+
+function renderCreation(): void {
+  element<HTMLFieldSetElement>('new-chat-fields').disabled = newFormLoading || Boolean(creation);
+  const button = element<HTMLButtonElement>('create-chat-button');
+  button.disabled = newFormLoading || Boolean(creation);
+  button.textContent = creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送';
+  element('new-chat-status').textContent = newFormLoading ? '正在读取模型选项…'
+    : creation?.status === 'unknown' ? '请先检查会话列表，确认是否已创建。首条消息已保留。'
+    : creation ? '正在确认创建结果，返回列表后仍会保留本次请求。' : '';
+  element('new-chat-status').hidden = !newFormLoading && !creation;
+  element('resolve-create').hidden = creation?.status !== 'unknown';
+  showFormError('new-chat-error', creation?.error ?? newFormError);
+}
+
+async function openNewChat(): Promise<void> {
+  if (!client || !connection) return;
+  const serverId = connection.serverId;
+  const request = ++dialogRequest;
+  creation = readStored<Creation>(storageKey('creation'));
+  const draft = creation ?? readStored<NewChatDraft>(storageKey('new-chat-draft')) ?? {
+    prompt: '', projectId: projectFilter.value && projectFilter.value !== '__none__' ? projectFilter.value : undefined,
+  };
+  const projectSelect = element<HTMLSelectElement>('new-chat-project');
+  projectSelect.replaceChildren(new Option('无项目', ''));
+  projectSelect.setCustomValidity('');
+  for (const project of projects) projectSelect.add(new Option(project.name, project.id));
+  if (draft.projectId && !projects.some(project => project.id === draft.projectId)) {
+    const unavailable = new Option('原项目已不可用', draft.projectId);
+    unavailable.disabled = true;
+    projectSelect.add(unavailable);
+    projectSelect.setCustomValidity('请重新选择可用项目');
+  }
+  projectSelect.value = draft.projectId ?? '';
+  element<HTMLTextAreaElement>('new-chat-prompt').value = draft.prompt;
+  newFormLoading = true;
+  newFormError = '';
+  populateParameters(newModel, newThinking, modelChoices, draft, '使用默认设置');
+  const project = projects.find(item => item.id === draft.projectId);
+  element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
+  renderCreation();
+  newDialog.showModal();
+  try {
+    const result = await client.request<{ models: ModelChoice[] }>('/models');
+    if (request !== dialogRequest || connection?.serverId !== serverId) return;
+    modelChoices = result.models;
+    populateParameters(newModel, newThinking, modelChoices, draft, '使用默认设置');
+  } catch (error) {
+    if (request === dialogRequest) newFormError = `模型选项读取失败。${errorText(error)}`;
+  } finally {
+    if (request === dialogRequest) { newFormLoading = false; renderCreation(); }
+  }
+  if (creation) void pollCreation();
+}
+
+async function createChat(): Promise<void> {
+  if (!client || !connection || creation || newFormLoading) return;
+  const draft = newChatDraft();
+  if (!draft.prompt.trim()) return;
+  const serverId = connection.serverId;
+  const request: Creation = { ...draft, requestId: crypto.randomUUID(), status: 'sending' };
+  creation = request;
+  newFormError = '';
+  localStorage.setItem(storageKey('creation'), JSON.stringify(request));
+  renderCreation();
+  try {
+    await client.request<Receipt>('/threads', 'POST', { ...draft, requestId: request.requestId });
+  } catch (error) {
+    if (connection?.serverId !== serverId || creation?.requestId !== request.requestId) return;
+    creation.error = `创建结果待确认。${errorText(error)}`;
+    localStorage.setItem(storageKey('creation'), JSON.stringify(creation));
+    renderCreation();
+  }
+  if (connection?.serverId === serverId) void pollCreation();
+}
+
+async function resumeCreation(): Promise<void> {
+  if (!client || !connection || !foreground) return;
+  creation = readStored<Creation>(storageKey('creation'));
+  if (creation) await pollCreation();
+}
+
+async function pollCreation(): Promise<void> {
+  if (!client || !connection || !creation || !foreground) return;
+  const requestId = creation.requestId;
+  const serverId = connection.serverId;
+  const key = `${serverId}:${requestId}`;
+  const actionClient = client;
+  if (creationPolling?.key === key && creationPolling.client === actionClient) return;
+  const owner = { key, client: actionClient };
+  creationPolling = owner;
+  try {
+    while (foreground && client === actionClient && connection?.serverId === serverId && creation?.requestId === requestId) {
+      let receipt: Receipt;
+      try { receipt = await actionClient.request<Receipt>(`/requests/${encodeURIComponent(requestId)}`); }
+      catch (error) {
+        if (client !== actionClient || connection?.serverId !== serverId || creation?.requestId !== requestId) return;
+        creation.error = errorText(error);
+        const missing = error instanceof ReachError && error.status === 404;
+        if (missing) creation.status = 'unknown';
+        localStorage.setItem(storageKey('creation'), JSON.stringify(creation));
+        renderCreation();
+        if (missing) return;
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
+      }
+      if (client !== actionClient || connection?.serverId !== serverId || creation?.requestId !== requestId) return;
+      if (receipt.status === 'accepted' && receipt.result?.threadId) {
+        const threadId = receipt.result.threadId;
+        creation = null;
+        localStorage.removeItem(storageKey('creation'));
+        localStorage.removeItem(storageKey('new-chat-draft'));
+        if (newDialog.open) {
+          newDialog.close();
+          await openChat(threadId);
+        } else {
+          inform('新会话已创建，可在会话列表中查看。');
+          if (currentView === 'inbox') await refreshInbox();
+        }
+        return;
+      }
+      creation.status = receipt.status;
+      creation.error = receipt.error ?? undefined;
+      localStorage.setItem(storageKey('creation'), JSON.stringify(creation));
+      renderCreation();
+      if (receipt.status === 'unknown') return;
+      await new Promise(resolve => setTimeout(resolve, 700));
+    }
+  } finally {
+    if (creationPolling === owner) creationPolling = null;
+  }
+}
+
+async function openParameters(): Promise<void> {
+  if (!client || !connection || !selected) return;
+  const request = ++dialogRequest;
+  const serverId = connection.serverId;
+  optionsChatId = selected.id;
+  const id = optionsChatId;
+  element<HTMLButtonElement>('save-options').disabled = true;
+  element('options-current').textContent = '正在读取会话参数…';
+  showFormError('options-error');
+  populateParameters(optionsModel, optionsThinking, modelChoices, turnOptions, '沿用会话设置');
+  optionsModel.disabled = true;
+  optionsThinking.disabled = true;
+  optionsDialog.showModal();
+  try {
+    const [catalog, settings] = await Promise.all([
+      client.request<{ models: ModelChoice[] }>('/models'),
+      client.request<TurnOptions>(`/threads/${encodeURIComponent(id)}/settings`),
+    ]);
+    if (request !== dialogRequest || connection?.serverId !== serverId || selected?.id !== id) return;
+    modelChoices = catalog.models;
+    populateParameters(optionsModel, optionsThinking, modelChoices, turnOptions, '沿用会话设置');
+    optionsModel.disabled = false;
+    element('options-current').textContent = settings.model ? `当前会话使用 ${settings.model}${settings.thinking ? ` · ${settings.thinking}` : ''}` : '当前会话沿用 Codex 默认设置';
+    element<HTMLButtonElement>('save-options').disabled = false;
+  } catch (error) {
+    if (request === dialogRequest) showFormError('options-error', errorText(error));
+  }
+}
+
+function clearStopOperation(): void {
+  if (selected) localStorage.removeItem(storageKey('stop', selected.id));
+  stopOperation = null;
+}
+
+function settleStopFromRuntime(): void {
+  if (runtimeStatus !== null && stopOperation?.status === 'accepted' && activeTurnId !== stopOperation.expectedTurnId) clearStopOperation();
+}
+
+async function checkStopReceipt(token: number): Promise<void> {
+  if (!client || !selected || !stopOperation) return;
+  const requestId = stopOperation.requestId;
+  let receipt: Receipt;
+  try { receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(requestId)}`); }
+  catch (error) {
+    if (token !== generation || stopOperation?.requestId !== requestId) return;
+    stopOperation.status = 'unknown';
+    stopOperation.error = `停止结果待确认。${errorText(error)}`;
+    localStorage.setItem(storageKey('stop', selected.id), JSON.stringify(stopOperation));
+    renderChat();
+    return;
+  }
+  if (token !== generation || stopOperation?.requestId !== requestId) return;
+  if (receipt.status === 'accepted' && receipt.result?.interruptedTurnId == null) {
+    clearStopOperation();
+    inform('目标轮次已结束或已切换，请根据当前任务状态操作。');
+    revision = null;
+    clearRuntimeStatus();
+    syncing = true;
+  } else {
+    stopOperation.status = receipt.status;
+    stopOperation.error = receipt.error ?? undefined;
+    localStorage.setItem(storageKey('stop', selected.id), JSON.stringify(stopOperation));
+    if (receipt.result?.goalPauseError) inform(`轮次已中断，暂停目标时出现问题。${receipt.result.goalPauseError}`);
+    settleStopFromRuntime();
+  }
+  renderChat();
+}
+
+async function stopTask(): Promise<void> {
+  if (!client || !selected || !activeTurnId || runtimeStatus !== 'active' || stopOperation) return;
+  const token = generation;
+  const id = selected.id;
+  stopOperation = { requestId: crypto.randomUUID(), expectedTurnId: activeTurnId, status: 'sending' };
+  localStorage.setItem(storageKey('stop', id), JSON.stringify(stopOperation));
+  renderChat();
+  try { await client.request(`/threads/${encodeURIComponent(id)}/stop`, 'POST', stopOperation); }
+  catch (error) {
+    if (token !== generation || !stopOperation) return;
+    stopOperation.error = `停止结果待确认。${errorText(error)}`;
+    localStorage.setItem(storageKey('stop', id), JSON.stringify(stopOperation));
+  }
+  if (token === generation) await checkStopReceipt(token);
+}
+
 element('connection-form').addEventListener('submit', event => { event.preventDefault(); void connect(); });
+element('new-chat-button').addEventListener('click', () => void openNewChat());
+element('new-chat-form').addEventListener('submit', event => { event.preventDefault(); void createChat(); });
+element('new-chat-project').addEventListener('change', () => {
+  element<HTMLSelectElement>('new-chat-project').setCustomValidity('');
+  saveNewChatDraft();
+});
+element('new-chat-prompt').addEventListener('input', saveNewChatDraft);
+newModel.addEventListener('change', () => {
+  newModel.setCustomValidity('');
+  updateThinking(newModel, newThinking, modelChoices);
+  saveNewChatDraft();
+});
+newThinking.addEventListener('change', () => { newThinking.setCustomValidity(''); saveNewChatDraft(); });
+element('resolve-create').addEventListener('click', () => {
+  creation = null;
+  localStorage.removeItem(storageKey('creation'));
+  newFormError = '';
+  renderCreation();
+  saveNewChatDraft();
+});
+element('parameters-button').addEventListener('click', () => void openParameters());
+optionsModel.addEventListener('change', () => {
+  optionsModel.setCustomValidity('');
+  updateThinking(optionsModel, optionsThinking, modelChoices);
+});
+optionsThinking.addEventListener('change', () => optionsThinking.setCustomValidity(''));
+element('options-form').addEventListener('submit', event => {
+  event.preventDefault();
+  if (!selected || selected.id !== optionsChatId) return;
+  turnOptions = selectedParameters(optionsModel, optionsThinking);
+  localStorage.setItem(storageKey('options', selected.id), JSON.stringify(turnOptions));
+  optionsDialog.close();
+  renderChat();
+});
+stopButton.addEventListener('click', () => void stopTask());
+element('resolve-stop').addEventListener('click', () => { clearStopOperation(); void stopTask(); });
+for (const button of document.querySelectorAll<HTMLButtonElement>('[data-close-dialog]')) {
+  button.addEventListener('click', () => element<HTMLDialogElement>(button.dataset.closeDialog!).close());
+}
+for (const dialog of [newDialog, optionsDialog]) dialog.addEventListener('close', () => { dialogRequest += 1; });
 element('settings-button').addEventListener('click', openSettings);
 element('chat-settings-button').addEventListener('click', openSettings);
 element('cancel-settings').addEventListener('click', closeSettings);
@@ -555,24 +922,28 @@ projectFilter.addEventListener('change', renderInbox);
 searchInput.addEventListener('input', renderInbox);
 refreshButton.addEventListener('click', () => void refreshInbox());
 element('more-threads').addEventListener('click', async () => {
-  if (!client || !nextThreads) return;
+  if (!client || !nextThreads || moreLoading) return;
+  const token = generation;
   const button = element<HTMLButtonElement>('more-threads');
+  moreLoading = true;
   button.disabled = true;
   try {
     const page = await client.request<{ threads: Thread[]; nextCursor: string | null }>(`/threads?cursor=${encodeURIComponent(nextThreads)}`);
+    if (token !== generation) return;
     const existing = new Set(threads.map(thread => thread.id));
     threads.push(...page.threads.filter(thread => !existing.has(thread.id)));
     nextThreads = page.nextCursor;
     renderInbox();
-  } catch (error) { inform(errorText(error)); }
-  finally { button.disabled = false; }
+  } catch (error) { if (token === generation) inform(errorText(error)); }
+  finally { if (token === generation) { moreLoading = false; button.disabled = !connected; } }
 });
 olderButton.addEventListener('click', async () => {
-  if (!client || !selected?.nextCursor) return;
+  if (!client || !selected?.nextCursor || olderLoading || syncing) return;
   const token = generation;
   const oldHeight = scroll.scrollHeight;
   const oldTop = scroll.scrollTop;
-  olderButton.disabled = true;
+  olderLoading = true;
+  renderChat();
   try {
     const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(selected.id)}/history?cursor=${encodeURIComponent(selected.nextCursor)}`);
     if (token !== generation || !selected) return;
@@ -581,14 +952,14 @@ olderButton.addEventListener('click', async () => {
     renderChat();
     scroll.scrollTop = oldTop + scroll.scrollHeight - oldHeight;
   } catch (error) { await reportReadError(error, token, 'history'); }
-  finally { olderButton.disabled = !connected; }
+  finally { if (token === generation) { olderLoading = false; renderChat(); } }
 });
 element('message-form').addEventListener('submit', event => { event.preventDefault(); void sendMessage(); });
 messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
   messageInput.style.height = 'auto';
   messageInput.style.height = `${Math.min(160, messageInput.scrollHeight)}px`;
-  sendButton.disabled = !connected || Boolean(pending) || !messageInput.value.trim();
+  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || !messageInput.value.trim();
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));
@@ -599,7 +970,9 @@ element('resolve-delivery').addEventListener('click', () => {
 
 if (Capacitor.getPlatform() === 'android') {
   void App.addListener('backButton', () => {
-    if (currentView === 'chat') backToInbox();
+    const dialog = document.querySelector<HTMLDialogElement>('dialog[open]');
+    if (dialog) dialog.close();
+    else if (currentView === 'chat') backToInbox();
     else if (currentView === 'connection' && settingsReturnView) closeSettings();
     else void App.minimizeApp();
   });
@@ -609,6 +982,7 @@ if (Capacitor.getPlatform() === 'android') {
     if (isActive && currentView === 'chat') resumeChat();
     else if (isActive && currentView === 'inbox') void refreshInbox();
     else if (!isActive) void flushCache();
+    if (isActive) void resumeCreation();
   });
 }
 
@@ -626,4 +1000,5 @@ if (connection) {
     showView('inbox');
     void refreshInbox();
   }
+  void resumeCreation();
 }

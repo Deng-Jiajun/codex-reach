@@ -360,7 +360,47 @@ impl Ipc {
         }
     }
 
-    pub async fn send(&self, id: &str, owner: &str, prompt: &str, request_id: &str) -> Result<()> {
+    pub async fn read_settings(&self, id: &str) -> Result<Option<Value>> {
+        let Some(owner) = self.follow(id).await? else {
+            return Ok(None);
+        };
+        let response = self
+            .request(
+                "thread-follower-read-model-settings",
+                json!({"conversationId":id}),
+                Some(&owner),
+                1,
+            )
+            .await?;
+        let settings = response["result"]
+            .get("settings")
+            .context("缺少会话模型设置")?;
+        Ok((!settings.is_null()).then(|| settings.clone()))
+    }
+
+    pub async fn interrupt(&self, id: &str, expected_turn_id: &str) -> Result<Value> {
+        let Some(owner) = self.follow(id).await? else {
+            return Ok(json!({"ok":true,"interruptedTurnId":null}));
+        };
+        let response = self
+            .request(
+                "thread-follower-interrupt-turn",
+                json!({"conversationId":id,"mode":"user-stop","expectedTurnId":expected_turn_id}),
+                Some(&owner),
+                4,
+            )
+            .await?;
+        response.get("result").cloned().context("缺少停止任务结果")
+    }
+
+    pub async fn send(
+        &self,
+        id: &str,
+        owner: &str,
+        prompt: &str,
+        request_id: &str,
+        options: &Value,
+    ) -> Result<()> {
         let (active, cwd) = {
             let subscriptions = self.subscriptions.lock().await;
             let state = subscriptions
@@ -392,6 +432,24 @@ impl Ipc {
             )
             .await?;
         } else {
+            let mut settings = serde_json::Map::new();
+            if let Some(model) = options["model"].as_str() {
+                settings.insert("model".to_owned(), json!(model));
+            }
+            if let Some(thinking) = options["thinking"].as_str() {
+                settings.insert("effort".to_owned(), json!(thinking));
+            }
+            if !settings.is_empty() {
+                let response = self
+                    .request(
+                        "thread-follower-update-thread-settings",
+                        json!({"conversationId":id,"threadSettings":settings}),
+                        Some(owner),
+                        2,
+                    )
+                    .await?;
+                ensure!(response["result"]["applied"] == true, "会话模型设置未应用");
+            }
             self.request(
                 "thread-follower-start-turn",
                 json!({"conversationId":id,"turnStart":{
