@@ -439,8 +439,9 @@ pub fn editable_turn(state: &Value) -> Option<Value> {
     let input = turn["params"]["input"]
         .as_array()?
         .iter()
-        .find(|part| part["type"] == "text")?["text"]
-        .as_str()?;
+        .find(|part| part["type"] == "text")
+        .and_then(|part| part["text"].as_str())
+        .unwrap_or_default();
     let body = user_text(input).0;
     let page_comment_body = input
         .strip_prefix("<page-comment-context>\n")
@@ -761,6 +762,11 @@ mod tests {
             editable_turn(&state).unwrap(),
             json!({"turnId":"latest","messageId":"user","prompt":"original"})
         );
+        let mut image_only = state.clone();
+        let image_input = json!([{"type":"localImage","path":"image.png"}]);
+        image_only["turns"][0]["params"]["input"] = image_input.clone();
+        image_only["turns"][0]["items"][0]["content"] = image_input;
+        assert_eq!(editable_turn(&image_only).unwrap()["prompt"], "");
         let page_body = "修改这段说明\n## My request:\n正文中的标题";
         state["turns"][0]["params"]["input"][0]["text"] = json!(format!(
             "<page-comment-context>\ncomment data\n</page-comment-context>\n## My request:\n{page_body}"
