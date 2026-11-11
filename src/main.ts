@@ -523,6 +523,9 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     const attachments = document.createElement('div');
     attachments.className = 'message-attachments';
     node.append(attachments);
+    const actions = document.createElement('div');
+    actions.className = 'message-actions';
+    node.append(actions);
     if (message.kind === 'user' || message.kind === 'assistant') {
       const quote = document.createElement('button');
       quote.type = 'button';
@@ -542,7 +545,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
         });
         selectedText = '';
       });
-      node.append(quote);
+      actions.append(quote);
     }
     if (message.kind === 'user') {
       const edit = document.createElement('button');
@@ -550,7 +553,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
       edit.className = 'quiet edit-message';
       edit.textContent = '编辑';
       edit.addEventListener('click', () => openEdit());
-      node.append(edit);
+      actions.append(edit);
     }
     renderedMessages.set(key, node);
   }

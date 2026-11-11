@@ -846,7 +846,7 @@ async fn main() -> Result<()> {
         app_server: app_server::AppServerClient::default(),
         outbox: Outbox::open(&directory.join("outbox.db"))?,
         send_locks: Mutex::new(HashMap::new()),
-        upload_directory: directory.join("uploads"),
+        upload_directory: std::path::absolute(directory.join("uploads"))?,
         config,
     });
     let cors = CorsLayer::new()

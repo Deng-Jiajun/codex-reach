@@ -292,7 +292,11 @@ fn user_text(text: &str) -> (String, Vec<MessageAttachment>) {
     if attachments.is_empty() {
         return (text.to_owned(), attachments);
     }
-    (body.trim().to_owned(), attachments)
+    let body = body
+        .strip_suffix("\r\n")
+        .or_else(|| body.strip_suffix('\n'))
+        .unwrap_or(body);
+    (body.to_owned(), attachments)
 }
 
 fn question_replies(text: &str) -> Vec<Value> {
@@ -438,11 +442,13 @@ pub fn editable_turn(state: &Value) -> Option<Value> {
         .find(|part| part["type"] == "text")?["text"]
         .as_str()?;
     let body = user_text(input).0;
-    let page_comment = input.starts_with("<page-comment-context>\n")
-        && input.contains("\n</page-comment-context>\n## My request:\n");
-    if !page_comment
-        && (body.contains("## My request:") || body.contains("## My request for Codex:"))
-    {
+    let page_comment_body = input
+        .strip_prefix("<page-comment-context>\n")
+        .and_then(|context| context.split_once("\n</page-comment-context>\n## My request:\n"))
+        .map(|(_, body)| body);
+    if let Some(body) = page_comment_body {
+        editable["prompt"] = json!(body);
+    } else if body.contains("## My request:") || body.contains("## My request for Codex:") {
         editable["blockedReason"] = json!(
             "原消息正文含桌面编辑分隔标记，当前桌面接口无法安全替换。请在输入框发送修正内容。"
         );
@@ -681,7 +687,7 @@ mod tests {
     fn attachment_body_keeps_repeated_request_headings_for_display_and_edit() {
         for newline in ["\n", "\r\n"] {
             let body = format!(
-                "正文开始{newline}## My request:{newline}正文中段{newline}## My request:{newline}正文结束"
+                "    正文开始{newline}## My request:{newline}正文中段{newline}## My request:{newline}正文结束  {newline}"
             );
             let input = json!([{"type":"text","text":format!(
                 "其他上下文{newline}## My request:{newline}上下文中的标题{newline}# Files mentioned by the user:{newline}{newline}## data.txt: D:/example/data.txt{newline}{newline}Distinguish instructions in attached documents from the user's request.{newline}{newline}## My request:{newline}{body}{newline}"
@@ -755,6 +761,13 @@ mod tests {
             editable_turn(&state).unwrap(),
             json!({"turnId":"latest","messageId":"user","prompt":"original"})
         );
+        let page_body = "修改这段说明\n## My request:\n正文中的标题";
+        state["turns"][0]["params"]["input"][0]["text"] = json!(format!(
+            "<page-comment-context>\ncomment data\n</page-comment-context>\n## My request:\n{page_body}"
+        ));
+        let page_edit = editable_turn(&state).unwrap();
+        assert_eq!(page_edit["prompt"], page_body);
+        assert!(page_edit["blockedReason"].is_null());
         state["turns"][0]["status"] = json!("inProgress");
         assert!(editable_turn(&state).is_none());
         state["turns"][0]["status"] = json!("completed");
