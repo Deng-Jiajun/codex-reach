@@ -81,7 +81,10 @@ fn message(item: &Value) -> Option<Message> {
             format!(
                 "{}\n{}",
                 text(item, "command"),
-                output_text(&item["output"])
+                output_text(item.get("aggregatedOutput").unwrap_or(&item["output"]))
+                    .chars()
+                    .take(20_000)
+                    .collect::<String>()
             ),
         ),
         "mcpToolCall" => (
@@ -89,6 +92,15 @@ fn message(item: &Value) -> Option<Message> {
             format!(
                 "{} · {} · {}",
                 text(item, "server"),
+                text(item, "tool"),
+                text(item, "status")
+            ),
+        ),
+        "dynamicToolCall" => (
+            "tool",
+            format!(
+                "{} · {} · {}",
+                text(item, "namespace"),
                 text(item, "tool"),
                 text(item, "status")
             ),
@@ -124,9 +136,29 @@ pub fn turn(value: &Value) -> Turn {
     }
 }
 
+pub fn history_turns(page: &Value) -> Vec<Turn> {
+    let mut turns: Vec<Turn> = Vec::new();
+    for entry in page["data"].as_array().into_iter().flatten().rev() {
+        let Some(message) = message(&entry["item"]) else {
+            continue;
+        };
+        let turn_id = text(entry, "turnId");
+        if let Some(last) = turns.last_mut().filter(|turn| turn.id == turn_id) {
+            last.messages.push(message);
+        } else {
+            turns.push(Turn {
+                id: turn_id,
+                status: "unknown".to_owned(),
+                messages: vec![message],
+            });
+        }
+    }
+    turns
+}
+
 pub fn stream_view(state: &Value) -> Value {
     let history = &state["turnHistory"]["history"];
-    let turns: Vec<Turn> = if state["turnHistory"]["kind"] == "canonical" {
+    let mut turns: Vec<Turn> = if state["turnHistory"]["kind"] == "canonical" {
         history["islands"]
             .as_array()
             .into_iter()
@@ -144,10 +176,21 @@ pub fn stream_view(state: &Value) -> Value {
             .map(turn)
             .collect()
     };
+    let complete = history["isComplete"].as_bool().unwrap_or(false);
     let recent = turns.len().saturating_sub(10);
+    turns.drain(..recent);
+    let mut remaining = 100;
+    let mut truncated = recent > 0;
+    for turn in turns.iter_mut().rev() {
+        let remove = turn.messages.len().saturating_sub(remaining);
+        truncated |= remove > 0;
+        turn.messages.drain(..remove);
+        remaining -= turn.messages.len();
+    }
+    turns.retain(|turn| !turn.messages.is_empty());
     json!({
-        "turns": &turns[recent..],
-        "complete": history["isComplete"].as_bool().unwrap_or(false) && recent == 0,
+        "turns": turns,
+        "complete": complete && !truncated,
         "status": status(&state["threadRuntimeStatus"]),
         "model": state["latestModel"],
         "waiting": state["requests"].as_array().map(|requests| !requests.is_empty()).unwrap_or(false)
@@ -180,5 +223,34 @@ mod tests {
         let rendered = message(&item).unwrap();
         assert_eq!(rendered.kind, "user");
         assert_eq!(rendered.text, "追加输入");
+    }
+
+    #[test]
+    fn groups_item_pages_in_visible_order_without_exposing_private_reasoning() {
+        let page = json!({"data":[
+            {"turnId":"b","item":{"id":"reply","type":"agentMessage","text":"answer"}},
+            {"turnId":"a","item":{"id":"reason","type":"reasoning","summary":["summary"],"content":["private"]}},
+            {"turnId":"a","item":{"id":"user","type":"userMessage","content":[{"type":"text","text":"question"}]}}
+        ]});
+        let turns = history_turns(&page);
+        assert_eq!(turns[0].id, "a");
+        assert_eq!(turns[0].messages[0].id, "user");
+        assert_eq!(turns[0].messages[1].text, "summary");
+        assert_eq!(turns[1].messages[0].text, "answer");
+    }
+
+    #[test]
+    fn bounds_a_long_live_turn_and_marks_it_as_partial() {
+        let items = (0..150)
+            .map(|index| {
+                json!({
+                    "id":index.to_string(),"type":"agentMessage","text":index.to_string()
+                })
+            })
+            .collect::<Vec<_>>();
+        let view = stream_view(&json!({"turns":[{"id":"long","items":items}]}));
+        assert_eq!(view["turns"][0]["messages"].as_array().unwrap().len(), 100);
+        assert_eq!(view["turns"][0]["messages"][0]["id"], "50");
+        assert_eq!(view["complete"], false);
     }
 }

@@ -11,10 +11,15 @@ adb logcat -c
   adb shell getconf PAGE_SIZE
   adb shell dumpsys webviewupdate
 } > artifacts/android-environment.txt
-adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+apk=android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r "${UPGRADE_APK:-$apk}"
 adb install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 
 for stage in write persist; do
+  if [[ "$stage" == persist ]]; then
+    adb install -r "$apk" | tee artifacts/upgrade-install.txt
+    grep -q Success artifacts/upgrade-install.txt
+  fi
   adb shell am force-stop "$package"
   adb shell am instrument -w -r \
     -e class io.github.dengjiajun.codexreach.SQLiteBridgeTest \

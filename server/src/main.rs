@@ -1,4 +1,5 @@
 mod desktop;
+mod history;
 mod model;
 mod outbox;
 
@@ -38,6 +39,7 @@ struct Config {
 struct AppState {
     config: Config,
     tools: AppTools,
+    history: history::HistoryReader,
     ipc: Mutex<Option<Arc<Ipc>>>,
     outbox: Outbox,
     send_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -168,23 +170,12 @@ async fn history(
     Path(id): Path<String>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut arguments = json!({"threadId":id,"hostId":"local","turnLimit":10,"includeOutputs":true,"maxOutputCharsPerItem":20000});
-    if let Some(cursor) = query.cursor {
-        arguments["cursor"] = json!(cursor);
-    }
-    let result = state.tools.call("read_thread", arguments).await?;
-    let turns = result["turns"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .rev()
-        .map(model::turn)
-        .collect::<Vec<_>>();
-    Ok(Json(
-        json!({"id":id,"title":model::text(&result["thread"], "title"),"cwd":result["thread"]["cwd"],
-        "status":model::status(&result["thread"]["status"]),"turns":turns,
-        "nextCursor":result["page"]["nextCursor"],"hasMore":result["page"]["hasMore"]}),
-    ))
+    state
+        .history
+        .page(&id, query.cursor)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))
 }
 
 #[derive(Deserialize)]
@@ -338,6 +329,7 @@ async fn main() -> Result<()> {
             pipe_path: config.app_tools_pipe.clone(),
         },
         ipc: Mutex::new(None),
+        history: history::HistoryReader::default(),
         outbox: Outbox::open(&directory.join("outbox.db"))?,
         send_locks: Mutex::new(HashMap::new()),
         config,

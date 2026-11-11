@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, urlparse
 condition = threading.Condition()
 state = {
     "online": True,
+    "history_error": True,
     "revision": 1,
     "status": "idle",
     "requests": {},
@@ -48,14 +49,26 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorized():
             return
         if url.path == '/api/threads':
-            time.sleep(0.6)
+            time.sleep(1)
         with condition:
             if url.path == "/api/status":
                 result = {"serverId": "android-fixture", "version": "0.2.0", "desktopConnected": True}
             elif url.path == "/api/projects":
                 result = {"projects": [{"id": "fixture-project", "name": "验证项目", "path": "C:\\Example"}]}
             elif url.path == "/api/threads":
-                result = {"threads": [{"id": "fixture-chat", "title": "连接与缓存验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": state["status"], "updatedAt": 1794326400}], "nextCursor": None}
+                result = {"threads": [
+                    {"id": "fixture-chat", "title": "连接与缓存验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": state["status"], "updatedAt": 1794326400},
+                    {"id": "fixture-error", "title": "历史读取异常验证", "projectId": "fixture-project", "cwd": "C:\\Example", "status": "idle", "updatedAt": 1794326400},
+                ], "nextCursor": None}
+            elif url.path == "/api/threads/fixture-error/history":
+                if state["history_error"]:
+                    self.reply({"error": "此会话历史暂时无法读取"}, 422)
+                    return
+                result = {"id": "fixture-error", "title": "历史读取异常验证", "cwd": "C:\\Example", "status": "idle",
+                    "turns": [{"id": "recovered", "status": "completed", "messages": [{"id": "ok", "kind": "assistant", "text": "READ_ERROR_RECOVERED", "phase": "final_answer"}]}],
+                    "nextCursor": None, "hasMore": False}
+            elif url.path == "/api/threads/fixture-error/live":
+                result = {"available": False}
             elif url.path == "/api/threads/fixture-chat/history":
                 result = {"id": "fixture-chat", "title": None, "cwd": "C:\\Example", "status": state["status"], "turns": state["turns"], "nextCursor": None, "hasMore": False}
             elif url.path == "/api/threads/fixture-chat/live":
@@ -74,6 +87,11 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
+        if self.path == "/control/history-ok":
+            with condition:
+                state["history_error"] = False
+            self.reply({"ok": True})
+            return
         if self.path in ("/control/offline", "/control/online"):
             with condition:
                 state["online"] = self.path == "/control/online"

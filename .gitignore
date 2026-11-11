@@ -5,6 +5,7 @@ dist/
 !.env.example
 *.jks
 *.keystore
+*.p12
 *.db
 *.db-shm
 *.db-wal

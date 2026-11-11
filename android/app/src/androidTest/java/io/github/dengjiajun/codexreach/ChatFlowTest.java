@@ -37,7 +37,7 @@ public class ChatFlowTest {
                 evaluate(webView, "document.querySelector('#server-key').value='fixture-access'; document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "!document.querySelector('#inbox-view').hidden && Boolean(document.querySelector('[data-thread-id=\"fixture-chat\"]'))");
                 evaluate(webView, "document.querySelector('#refresh-button').click(); null");
-                assertEquals("true", evaluate(webView, "document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-button').textContent==='刷新中…'"));
+                assertEquals("true", evaluate(webView, "document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-button').getAttribute('aria-busy')==='true' && getComputedStyle(document.querySelector('#refresh-button svg')).animationName==='refresh-spin'"));
                 await(webView, "!document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
                 await(webView, "document.querySelector('#messages').textContent.includes('连接已准备就绪')");
@@ -48,6 +48,7 @@ public class ChatFlowTest {
                 evaluate(webView, "document.querySelector('#message-input').value='保留的手机草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); null");
                 evaluate(webView, "document.querySelector('#messages-scroll').scrollTop=10; window.savedScrollTop=document.querySelector('#messages-scroll').scrollTop; document.querySelector('#chat-settings-button').click(); null");
                 await(webView, "!document.querySelector('#connection-view').hidden && !document.querySelector('#cancel-settings').hidden");
+                assertEquals("true", evaluate(webView, "Boolean(document.querySelector('.app-header #cancel-settings svg')) && document.querySelector('#cancel-settings').getBoundingClientRect().left<60"));
                 evaluate(webView, "document.querySelector('#server-key').value='wrong-key'; document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "document.querySelector('#notice').textContent.includes('访问密钥无效') && !document.querySelector('#connect-button').disabled");
                 evaluate(webView, "document.querySelector('#cancel-settings').click(); null");
@@ -58,7 +59,7 @@ public class ChatFlowTest {
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
 
                 control("offline");
-                await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('#chat-state').textContent==='重连中'");
+                await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('#chat-view [data-connection-status]').textContent==='重连中'");
                 evaluate(webView, "document.querySelector('#chat-settings-button').click(); null");
                 InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
                 await(webView, "!document.querySelector('#chat-view').hidden");
@@ -76,11 +77,23 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
                 await(webView, "document.querySelector('#chat-state').textContent==='空闲' && document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
+                evaluate(webView, "document.querySelector('#back-button').click(); null");
+                await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
+                evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-error\"]').click(); null");
+                await(webView, "!document.querySelector('#chat-error').hidden");
+                assertEquals("true", evaluate(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'"));
+                control("history-ok");
+                evaluate(webView, "document.querySelector('#retry-history').click(); null");
+                await(webView, "document.querySelector('#chat-error').hidden && document.querySelector('#messages').textContent.includes('READ_ERROR_RECOVERED')");
+                evaluate(webView, "document.querySelector('#back-button').click(); null");
+                await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
+                evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
+                await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
                 SystemClock.sleep(1200);
                 assertEquals("true", evaluate(webView, "!document.querySelector('#notice').textContent.includes('缓存') && document.querySelector('#message-input').value==='保留的手机草稿'"));
             } else {
                 assertEquals("chat-persist", stage);
-                await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#chat-state').textContent==='重连中'");
+                await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#chat-view [data-connection-status]').textContent==='重连中'");
                 assertEquals("true", evaluate(webView, "document.querySelector('#chat-title').textContent==='连接与缓存验证'"));
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
             }

@@ -9,8 +9,14 @@
   <body>
     <div id="app">
       <header class="app-header">
-        <span class="brand">Codex Reach</span>
-        <button id="settings-button" class="quiet" type="button">连接设置</button>
+        <div class="app-heading">
+          <button id="cancel-settings" class="quiet icon-button" type="button" aria-label="返回" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+          <span id="brand" class="brand">Codex Reach</span>
+        </div>
+        <div class="header-actions">
+          <span class="connection-state" data-connection-status role="status"></span>
+          <button id="settings-button" class="quiet icon-button" type="button" aria-label="连接设置"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2a8 8 0 0 0-1.5.9L5.3 5.4 3 9.4l1.5 1.5a8 8 0 0 0 0 2.2L3 14.6l2.3 4 2.1-.5a8 8 0 0 0 1.5.9l.6 2h5l.6-2a8 8 0 0 0 1.5-.9l2.1.5 2.3-4-1.5-1.5a8 8 0 0 0 0-2.2L21 9.4l-2.3-4-2.1.5a8 8 0 0 0-1.5-.9L14.5 3Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        </div>
       </header>
       <p id="notice" role="status" aria-live="polite" hidden></p>
       <div id="reconnect-notice" role="status" aria-live="polite" hidden>
@@ -19,10 +25,6 @@
       </div>
       <main id="connection-view" class="connection-view">
         <section class="connection-card">
-          <div class="connection-heading">
-            <h1>连接电脑</h1>
-            <button id="cancel-settings" class="quiet" type="button" hidden>返回</button>
-          </div>
           <p>打开电脑上的 Codex Reach 服务，手机连接同一 Tailscale 网络。</p>
           <form id="connection-form">
             <label for="server-url">服务地址</label>
@@ -39,8 +41,8 @@
         <div class="inbox-heading">
           <h1>对话</h1>
           <div class="refresh-controls">
-            <span id="refresh-status" role="status" aria-live="polite"></span>
-            <button id="refresh-button" class="quiet" type="button">刷新</button>
+            <span id="refresh-status" class="sr-only" role="status" aria-live="polite"></span>
+            <button id="refresh-button" class="quiet icon-button" type="button" aria-label="刷新"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8.3 8.3 0 0 1 20 12M4 12a8.3 8.3 0 0 0 13.9 5.9"/></svg></button>
           </div>
         </div>
         <div class="filters">
@@ -54,13 +56,20 @@
       </main>
       <main id="chat-view" class="chat-view" hidden>
         <header class="chat-header">
-          <button id="back-button" class="quiet back" type="button" aria-label="返回对话列表">‹</button>
+          <button id="back-button" class="quiet icon-button" type="button" aria-label="返回对话列表"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
           <div class="chat-heading">
             <h1 id="chat-title"></h1>
             <div class="chat-metadata"><p id="chat-meta"></p><span id="chat-state" class="state"></span></div>
           </div>
-          <button id="chat-settings-button" class="quiet" type="button" aria-label="连接设置">设置</button>
+          <div class="header-actions">
+            <span class="connection-state" data-connection-status role="status"></span>
+            <button id="chat-settings-button" class="quiet icon-button" type="button" aria-label="连接设置"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2a8 8 0 0 0-1.5.9L5.3 5.4 3 9.4l1.5 1.5a8 8 0 0 0 0 2.2L3 14.6l2.3 4 2.1-.5a8 8 0 0 0 1.5.9l.6 2h5l.6-2a8 8 0 0 0 1.5-.9l2.1.5 2.3-4-1.5-1.5a8 8 0 0 0 0-2.2L21 9.4l-2.3-4-2.1.5a8 8 0 0 0-1.5-.9L14.5 3Z"/><circle cx="12" cy="12" r="3"/></svg></button>
+          </div>
         </header>
+        <div id="chat-error" role="status" hidden>
+          <span id="chat-error-text"></span>
+          <button id="retry-history" class="quiet" type="button">重试</button>
+        </div>
         <div id="messages-scroll" class="messages-scroll">
           <button id="older-button" class="quiet more" type="button" hidden>读取更早的消息</button>
           <div id="messages"></div>

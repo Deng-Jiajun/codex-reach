@@ -4,7 +4,7 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
-import { mergeHistory, mergeTail } from './sync';
+import { mergeHistory, mergeTail, prependHistory } from './sync';
 import type { Connection, HistoryPage, LiveView, Message, Project, Receipt, Thread } from './types';
 import './style.css';
 
@@ -29,6 +29,9 @@ let settingsScrollTop = 0;
 let connectionAttempt = 0;
 let inboxRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let connectionError = '';
+let historyError = '';
+let streamError = '';
+let historyLoaded = false;
 let connection = readStored<Connection>('codex-reach-connection');
 let client = connection ? new ReachClient(connection) : null;
 let connected = false;
@@ -63,11 +66,18 @@ function showView(view: typeof currentView): void {
   currentView = view;
   for (const name of views) element(`${name}-view`).hidden = name !== view;
   document.querySelector<HTMLElement>('.app-header')!.hidden = view === 'chat';
+  element('brand').textContent = view === 'connection' ? '连接设置' : 'Codex Reach';
+  element('cancel-settings').hidden = view !== 'connection' || !settingsReturnView;
   element('settings-button').hidden = view === 'connection';
   renderConnection();
 }
 
 function renderConnection(): void {
+  const label = connected ? '已连接' : connection ? '重连中' : '未连接';
+  for (const badge of document.querySelectorAll<HTMLElement>('[data-connection-status]')) {
+    badge.textContent = label;
+    badge.dataset.connected = String(connected);
+  }
   element('reconnect-notice').hidden = !connection || connected || currentView === 'connection';
   element('reconnect-text').textContent = `正在重连，当前内容和草稿已保留。${connectionError}`;
 }
@@ -77,7 +87,7 @@ function stopUpdates(): void {
   clearTimeout(inboxRetryTimer);
   inboxRetryTimer = undefined;
   refreshButton.disabled = false;
-  refreshButton.textContent = '刷新';
+  refreshButton.setAttribute('aria-label', '刷新');
   refreshButton.removeAttribute('aria-busy');
 }
 
@@ -85,7 +95,11 @@ function resumeChat(): void {
   if (!selected || !foreground) return;
   stopUpdates();
   revision = null;
-  void followChat(selected.id, generation);
+  const id = selected.id;
+  const token = generation;
+  void updateHistory(id, token).then(() => {
+    if (token === generation) void followChat(id, token);
+  });
 }
 
 function openSettings(): void {
@@ -95,8 +109,6 @@ function openSettings(): void {
   stopUpdates();
   urlInput.value = connection?.url ?? '';
   keyInput.value = connection?.key ?? '';
-  element('cancel-settings').hidden = false;
-  element('cancel-settings').textContent = currentView === 'chat' ? '返回对话' : '返回列表';
   showView('connection');
 }
 
@@ -197,7 +209,7 @@ async function refreshInbox(): Promise<void> {
   stopUpdates();
   const token = generation;
   refreshButton.disabled = true;
-  refreshButton.textContent = '刷新中…';
+  refreshButton.setAttribute('aria-label', '正在刷新');
   refreshButton.setAttribute('aria-busy', 'true');
   element('refresh-status').textContent = '';
   try {
@@ -205,17 +217,19 @@ async function refreshInbox(): Promise<void> {
     if (token !== generation) return;
     connected = true;
     connectionError = '';
+    if (notice.textContent?.startsWith('列表读取失败')) inform();
     element('refresh-status').textContent = `已刷新 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
   } catch (error) {
     if (token !== generation) return;
-    connected = false;
-    connectionError = errorText(error);
+    await checkConnectionAfterError(error, token);
+    if (token !== generation) return;
     element('refresh-status').textContent = '刷新失败';
-    inboxRetryTimer = setTimeout(() => void refreshInbox(), 2000);
+    if (connected) inform(`列表读取失败。${errorText(error)}`);
+    else inboxRetryTimer = setTimeout(() => void refreshInbox(), 2000);
   } finally {
     if (token === generation) {
       refreshButton.disabled = false;
-      refreshButton.textContent = '刷新';
+      refreshButton.setAttribute('aria-label', '刷新');
       refreshButton.removeAttribute('aria-busy');
       renderConnection();
     }
@@ -259,9 +273,43 @@ async function refreshHistory(id: string, token: number): Promise<void> {
   if (!client) return;
   const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(id)}/history`);
   if (token !== generation || selected?.id !== id) return;
-  selected = mergeHistory(selected, page);
+  if (page.status === 'notLoaded' && selected.status) page.status = selected.status;
+  const current = historyLoaded ? selected : { ...selected, turns: [], hasMore: false, nextCursor: null };
+  selected = mergeHistory(current, page);
+  historyLoaded = true;
+  historyError = '';
+  connected = true;
+  connectionError = '';
   renderChat();
   scheduleCache();
+}
+
+async function checkConnectionAfterError(error: unknown, token: number): Promise<void> {
+  let reachable = false;
+  let failure = error;
+  if (client && error instanceof ReachError && error.status !== 401) {
+    try { await client.request('/status'); reachable = true; }
+    catch (statusError) { failure = statusError; }
+  }
+  if (token !== generation) return;
+  connected = reachable;
+  connectionError = reachable ? '' : errorText(failure);
+  renderConnection();
+}
+
+async function reportReadError(error: unknown, token: number, kind: 'history' | 'stream'): Promise<void> {
+  await checkConnectionAfterError(error, token);
+  if (token !== generation) return;
+  if (connected) {
+    if (kind === 'history') historyError = `历史读取失败。${errorText(error)}`;
+    else streamError = `实时更新失败。${errorText(error)}`;
+  }
+  renderChat();
+}
+
+async function updateHistory(id: string, token: number): Promise<void> {
+  try { await refreshHistory(id, token); }
+  catch (error) { await reportReadError(error, token, 'history'); }
 }
 
 async function openChat(id: string): Promise<void> {
@@ -270,6 +318,9 @@ async function openChat(id: string): Promise<void> {
   revision = null;
   liveWaiting = false;
   liveModel = '';
+  historyLoaded = false;
+  historyError = '';
+  streamError = '';
   renderedMessages.clear();
   const thread = threads.find(item => item.id === id);
   selected = { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
@@ -292,30 +343,29 @@ async function openChat(id: string): Promise<void> {
     void followChat(id, token);
   } catch (error) {
     if (token !== generation) return;
-    connected = false;
-    connectionError = errorText(error);
-    renderChat();
+    await reportReadError(error, token, 'history');
+    if (token !== generation) return;
     void followChat(id, token);
   }
 }
 
 async function followChat(id: string, token: number): Promise<void> {
   let previousStatus = selected?.status;
-  let refreshNeeded = true;
   while (token === generation && foreground && currentView === 'chat') {
     try {
       const query = revision ? `?after=${encodeURIComponent(revision)}` : '';
       const view = await client!.request<LiveView>(`/threads/${encodeURIComponent(id)}/live${query}`);
       if (token !== generation || !selected) return;
-      if (refreshNeeded || !connected) {
-        await refreshHistory(id, token);
-        if (token !== generation || !selected) return;
-        refreshNeeded = false;
-      }
+      const wasDisconnected = !connected;
       connected = true;
       connectionError = '';
+      streamError = '';
+      if (wasDisconnected && !historyError) {
+        await updateHistory(id, token);
+        if (token !== generation || !selected) return;
+      }
       if (!view.available) {
-        await refreshHistory(id, token);
+        if (!historyError) await updateHistory(id, token);
         if (token !== generation) return;
         renderChat();
         if (pending) await checkReceipt(token);
@@ -324,7 +374,7 @@ async function followChat(id: string, token: number): Promise<void> {
       }
       let merged = mergeTail(selected.turns, view.turns ?? [], Boolean(view.complete));
       if (!merged) {
-        await refreshHistory(id, token);
+        if (!historyError) await updateHistory(id, token);
         if (token !== generation || !selected) return;
         merged = mergeTail(selected.turns, view.turns ?? [], Boolean(view.complete));
       }
@@ -335,17 +385,16 @@ async function followChat(id: string, token: number): Promise<void> {
       liveModel = view.model ?? '';
       renderChat();
       scheduleCache();
-      if (previousStatus === 'active' && selected.status !== 'active') await refreshHistory(id, token);
+      if (previousStatus === 'active' && selected.status !== 'active') await updateHistory(id, token);
       if (token !== generation) return;
       previousStatus = selected.status;
       if (pending) await checkReceipt(token);
       await new Promise(resolve => setTimeout(resolve, 120));
     } catch (error) {
       if (token !== generation) return;
-      connected = false;
-      revision = null;
-      connectionError = errorText(error);
-      renderChat();
+      await reportReadError(error, token, 'stream');
+      if (token !== generation) return;
+      if (!connected) revision = null;
       await new Promise(resolve => setTimeout(resolve, 2000));
     }
   }
@@ -383,7 +432,9 @@ function renderChat(forceBottom = false): void {
   element('chat-title').textContent = selected.title || '未命名对话';
   element('chat-title').title = selected.title || '未命名对话';
   element('chat-meta').textContent = [selected.cwd, liveModel].filter(Boolean).join(' · ');
-  element('chat-state').textContent = connected ? stateLabel(selected.status) : '重连中';
+  element('chat-state').textContent = stateLabel(selected.status);
+  element('chat-error').hidden = !historyError && !streamError;
+  element('chat-error-text').textContent = [historyError, streamError].filter(Boolean).join(' ');
   renderConnection();
   olderButton.hidden = !selected.hasMore;
   olderButton.disabled = !connected;
@@ -453,8 +504,7 @@ async function checkReceipt(token: number): Promise<void> {
     pending = null;
     localStorage.removeItem(storageKey('pending', chatId));
     revision = null;
-    try { await refreshHistory(chatId, token); }
-    catch (error) { if (token === generation) inform(`消息已投递，读取回复失败。${errorText(error)}`); }
+    await updateHistory(chatId, token);
   } else {
     pending.status = receipt.status;
     localStorage.setItem(storageKey('pending', chatId), JSON.stringify(pending));
@@ -494,6 +544,13 @@ element('reconnect-button').addEventListener('click', () => {
   if (currentView === 'chat') resumeChat();
   else void refreshInbox();
 });
+element('retry-history').addEventListener('click', () => {
+  historyError = '';
+  streamError = '';
+  historyLoaded = false;
+  renderChat();
+  resumeChat();
+});
 projectFilter.addEventListener('change', renderInbox);
 searchInput.addEventListener('input', renderInbox);
 refreshButton.addEventListener('click', () => void refreshInbox());
@@ -519,13 +576,11 @@ olderButton.addEventListener('click', async () => {
   try {
     const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(selected.id)}/history?cursor=${encodeURIComponent(selected.nextCursor)}`);
     if (token !== generation || !selected) return;
-    const existing = new Set(selected.turns.map(turn => turn.id));
-    selected.turns = [...page.turns.filter(turn => !existing.has(turn.id)), ...selected.turns];
-    selected.hasMore = page.hasMore;
-    selected.nextCursor = page.nextCursor;
+    selected = prependHistory(selected, page);
+    historyError = '';
     renderChat();
     scroll.scrollTop = oldTop + scroll.scrollHeight - oldHeight;
-  } catch (error) { inform(errorText(error)); }
+  } catch (error) { await reportReadError(error, token, 'history'); }
   finally { olderButton.disabled = !connected; }
 });
 element('message-form').addEventListener('submit', event => { event.preventDefault(); void sendMessage(); });

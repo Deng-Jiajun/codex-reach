@@ -1,5 +1,7 @@
 apply plugin: 'com.android.application'
 
+def fixedSigningStore = System.getenv('REACH_SIGNING_STORE_FILE')
+
 android {
     namespace = "io.github.dengjiajun.codexreach"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +9,8 @@ android {
         applicationId "io.github.dengjiajun.codexreach"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 3
-        versionName "0.2.1-preview"
+        versionCode 4
+        versionName "0.2.2-preview"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,9 +18,21 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (fixedSigningStore) {
+            fixed {
+                storeFile file(fixedSigningStore)
+                storeType 'PKCS12'
+                storePassword System.getenv('REACH_SIGNING_PASSWORD')
+                keyAlias 'codex-reach'
+                keyPassword System.getenv('REACH_SIGNING_PASSWORD')
+            }
+        }
+    }
     buildTypes {
         debug {
             applicationIdSuffix ".verification"
+            if (fixedSigningStore) signingConfig signingConfigs.fixed
         }
         release {
             minifyEnabled false

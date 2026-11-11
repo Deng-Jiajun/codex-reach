@@ -4,9 +4,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      upgrade_run_id:
+        description: Successful fixed-signature run to install before testing the update
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   windows-service:
@@ -61,20 +67,44 @@ jobs:
           npm run android:sync
       - name: Build APK and instrumentation tests
         working-directory: android
+        env:
+          ANDROID_SIGNING_KEYSTORE: ${{ secrets.ANDROID_SIGNING_KEYSTORE }}
+          REACH_SIGNING_PASSWORD: ${{ secrets.ANDROID_SIGNING_PASSWORD }}
+          REACH_SIGNING_STORE_FILE: ${{ runner.temp }}/codex-reach.p12
         run: |
+          test -n "$ANDROID_SIGNING_KEYSTORE" && test -n "$REACH_SIGNING_PASSWORD"
+          umask 077
+          printf '%s' "$ANDROID_SIGNING_KEYSTORE" | base64 --decode > "$REACH_SIGNING_STORE_FILE"
           ./gradlew --no-daemon clean :app:assembleDebug :app:assembleDebugAndroidTest
           ./gradlew --no-daemon :app:dependencyInsight --dependency sqlite --configuration debugRuntimeClasspath
       - name: Check APK signing and 16 KB packaging
         run: |
           mkdir -p artifacts
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose android/app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs android/app/build/outputs/apk/debug/app-debug.apk | tee artifacts/signing.txt
           "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -P 16 -v 4 android/app/build/outputs/apk/debug/app-debug.apk > artifacts/zip-alignment.txt
           python3 scripts/check-elf-alignment.py android/app/build/outputs/apk/debug/app-debug.apk | tee artifacts/elf-alignment.txt
           sha256sum android/app/build/outputs/apk/debug/app-debug.apk | tee artifacts/apk-sha256.txt
+      - name: Download the previous fixed-signature APK
+        if: inputs.upgrade_run_id != ''
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: codex-reach-verification-*
+          run-id: ${{ inputs.upgrade_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}/previous-build
+          merge-multiple: true
+      - name: Compare update signing certificates
+        if: inputs.upgrade_run_id != ''
+        run: |
+          previous="$RUNNER_TEMP/previous-build/android/app/build/outputs/apk/debug/app-debug.apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$previous" > artifacts/previous-signing.txt
+          diff <(grep 'certificate SHA-256 digest:' artifacts/previous-signing.txt) <(grep 'certificate SHA-256 digest:' artifacts/signing.txt)
       - name: Enable emulator hardware acceleration
         run: sudo chmod a+rw /dev/kvm
       - name: Verify SQLite through the Capacitor bridge on Android 16
         uses: ReactiveCircus/android-emulator-runner@v2.38.0
+        env:
+          UPGRADE_APK: ${{ inputs.upgrade_run_id != '' && format('{0}/previous-build/android/app/build/outputs/apk/debug/app-debug.apk', runner.temp) || '' }}
         with:
           api-level: 36
           target: google_apis
