@@ -115,6 +115,8 @@ Codex 已有当前用户登录启动项，Tailscale 使用自动启动的系统�
 
 `0.5.1-preview` 已通过 31 项 Rust 测试、14 项前端测试和 11 项 Android 16 模拟器回归，APK 与 `0.5.0-preview` 的公开签名指纹一致。[本版 CI 与安装包产物](https://github.com/Deng-Jiajun/codex-reach/actions/runs/43069223799)
 
+`0.5.2-preview` 已通过 31 项 Rust 测试、16 项前端测试和 11 项 Android 16 模拟器回归。新增回归实际长按回答文字并点击悬浮入口，核对连续工具、思考分组和选段来源，APK 签名与 `0.5.1-preview` 一致。[0.5.2 CI 与安装包产物](https://github.com/Deng-Jiajun/codex-reach/actions/runs/43142142397)
+
 页面显示每项检查耗时。合成数据与 CI 模拟器耗时用于初步验证，真实长对话和手机性能另行测量。
 
 ## 工具链
