@@ -15,6 +15,92 @@ export function selectedMessageText(content: HTMLElement): TextSelection | undef
   return { startOffset, endOffset: prefix.toString().length };
 }
 
+export function createSelectionToolbar(root: HTMLElement,
+  onAdd: (text: string, messageId: string, selection: TextSelection) => void) {
+  const toolbar = document.createElement('div');
+  toolbar.id = 'selection-toolbar';
+  toolbar.className = 'selection-toolbar';
+  toolbar.setAttribute('role', 'toolbar');
+  toolbar.setAttribute('aria-label', '选中文字操作');
+  toolbar.hidden = true;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = '添加到对话';
+  toolbar.append(button);
+  document.body.append(toolbar);
+  let current: { text: string; messageId: string; selection: TextSelection } | null = null;
+  let frame = 0;
+  const hide = () => { toolbar.hidden = true; current = null; };
+  const dismiss = () => {
+    const selection = window.getSelection();
+    const inside = Boolean(selection?.rangeCount && root.contains(selection.getRangeAt(0).commonAncestorContainer));
+    const visible = !toolbar.hidden;
+    hide();
+    if (inside) selection!.removeAllRanges();
+    return inside || visible;
+  };
+  const update = () => {
+    frame = 0;
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || selection.isCollapsed || document.querySelector('dialog[open]')) { hide(); return; }
+    const range = selection.getRangeAt(0);
+    const start = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+    const content = start?.closest<HTMLElement>('.message.assistant .message-content');
+    const offsets = content && root.contains(content) ? selectedMessageText(content) : undefined;
+    if (!content || !offsets || !selection.toString().trim()) { hide(); return; }
+    const viewport = window.visualViewport;
+    const scroll = root.closest<HTMLElement>('.messages-scroll')!.getBoundingClientRect();
+    const leftBound = Math.max(viewport?.offsetLeft ?? 0, scroll.left) + 8;
+    const rightBound = Math.min((viewport?.offsetLeft ?? 0) + (viewport?.width ?? innerWidth), scroll.right) - 8;
+    const topBound = Math.max(viewport?.offsetTop ?? 0, scroll.top) + 8;
+    const viewportBottom = (viewport?.offsetTop ?? 0) + (viewport?.height ?? innerHeight);
+    const readingBottom = Math.min(viewportBottom, scroll.bottom) - 8;
+    const bottomInset = parseFloat(getComputedStyle(document.body).paddingBottom);
+    const bottomBound = Math.min(viewportBottom, innerHeight - bottomInset) - 8;
+    const anchor = Array.from(range.getClientRects()).find(rect => rect.width > 0 && rect.height > 0
+      && rect.bottom > topBound - 8 && rect.top < readingBottom + 8 && rect.right > leftBound && rect.left < rightBound);
+    if (!anchor || rightBound <= leftBound || bottomBound <= topBound) { hide(); return; }
+    toolbar.style.maxWidth = `${rightBound - leftBound}px`;
+    toolbar.hidden = false;
+    const { width, height } = toolbar.getBoundingClientRect();
+    if (height > bottomBound - topBound) { hide(); return; }
+    const above = anchor.top - height - 8;
+    const below = anchor.bottom + 8;
+    // Leave room above the selection for the native touch selection actions
+    const preferBelow = matchMedia('(pointer: coarse)').matches;
+    const positions = preferBelow ? [below, above] : [above, below];
+    const top = positions.find(top => top >= topBound && top + height <= readingBottom)
+      ?? positions.find(top => top >= topBound && top + height <= bottomBound) ?? positions[0];
+    toolbar.style.left = `${Math.max(leftBound, Math.min(rightBound - width, (anchor.left + anchor.right - width) / 2))}px`;
+    toolbar.style.top = `${Math.max(topBound, Math.min(bottomBound - height, top))}px`;
+    current = { text: content.textContent ?? '', messageId: content.closest<HTMLElement>('.message')!.dataset.messageId!, selection: offsets };
+  };
+  const refresh = () => { if (!frame) frame = requestAnimationFrame(update); };
+  toolbar.addEventListener('pointerdown', event => event.preventDefault());
+  button.addEventListener('click', () => {
+    if (!current) return;
+    const source = current;
+    dismiss();
+    onAdd(source.text, source.messageId, source.selection);
+  });
+  document.addEventListener('selectionchange', refresh);
+  document.addEventListener('pointerdown', event => {
+    if (event.target instanceof Node && !root.contains(event.target) && !toolbar.contains(event.target)) dismiss();
+  });
+  document.addEventListener('focusin', event => {
+    if (event.target instanceof Node && !root.contains(event.target) && !toolbar.contains(event.target)) dismiss();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !toolbar.hidden) { dismiss(); event.preventDefault(); }
+  });
+  root.closest('.messages-scroll')!.addEventListener('scroll', refresh, { passive: true, capture: true });
+  root.addEventListener('toggle', refresh, true);
+  window.addEventListener('resize', refresh);
+  window.visualViewport?.addEventListener('resize', refresh);
+  window.visualViewport?.addEventListener('scroll', refresh);
+  return { dismiss, refresh, setDisabled: (disabled: boolean) => { button.disabled = disabled; } };
+}
+
 export function annotationPrompt(prompt: string, annotations: ResponseAnnotation[]): string {
   if (!annotations.length) return prompt;
   return `\n# Response annotations:\nEach item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment.\n<response-annotations>\n${JSON.stringify(annotations)}\n</response-annotations>\n\n## My request:\n${prompt}`;

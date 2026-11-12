@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { groupMessages } from '../src/transcript.ts';
+import { groupMessages, groupProcessMessages } from '../src/transcript.ts';
 
 const message = (id, kind, phase = null) => ({ id, kind, phase, text: id });
 const processMessages = [
@@ -33,4 +33,19 @@ test('questions and attachments stay outside collapsed process groups', () => {
   const attachment = { ...message('image', 'assistant', 'commentary'), attachments: [{ name: 'preview.png', image: true }] };
   const groups = groupMessages([...processMessages, question, attachment]);
   assert.deepEqual(groups.map(group => group.process), [true, false, false]);
+});
+
+test('adjacent records share a disclosure while progress and other record types preserve order', () => {
+  const input = [message('tool-1', 'tool'), message('tool-2', 'tool'),
+    message('thought-1', 'reasoning'), message('thought-2', 'reasoning'),
+    message('progress', 'assistant', 'commentary'), message('tool-3', 'tool')];
+  const groups = groupProcessMessages(input);
+  assert.deepEqual(groups.map(group => [group.kind, group.messages.length]), [['tool', 2], ['reasoning', 2], [null, 1], ['tool', 1]]);
+  assert.deepEqual(groups.flatMap(group => group.messages), input);
+});
+
+test('record runs extend across partial pages without joining separated runs', () => {
+  const tail = [message('tool-2', 'tool'), message('thought', 'reasoning'), message('tool-3', 'tool')];
+  assert.deepEqual(groupProcessMessages(tail).map(group => group.messages.length), [1, 1, 1]);
+  assert.deepEqual(groupProcessMessages([message('tool-1', 'tool'), ...tail]).map(group => group.messages.length), [2, 1, 1]);
 });

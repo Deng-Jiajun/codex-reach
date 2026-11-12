@@ -116,7 +116,7 @@ jobs:
             bash -euo pipefail -c '
             bash scripts/android-smoke.sh;
             python3 scripts/chat-fixture.py > artifacts/organization-fixture.txt 2>&1 & organization_fixture_pid=$!;
-            trap "kill $organization_fixture_pid; adb logcat -d > artifacts/organization-logcat.txt || true" EXIT;
+            trap "kill $organization_fixture_pid; adb logcat -d > artifacts/organization-logcat.txt || true; adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-selection-popover.png artifacts/ || true" EXIT;
             for stage in organization organization-persist; do
             adb shell am force-stop io.github.dengjiajun.codexreach.verification;
             adb shell am instrument -w -r -e class io.github.dengjiajun.codexreach.OrganizationFlowTest

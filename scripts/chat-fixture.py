@@ -160,6 +160,7 @@ def initial_organization_state():
                     "attachments": [organization_files["C:/Example/history.png"]]},
                 {"id": "organization-progress", "kind": "assistant", "text": "正在核对配置与执行顺序。", "phase": "commentary"},
                 {"id": "organization-reasoning", "kind": "reasoning", "text": "核实入口与调用顺序。", "phase": None},
+                {"id": "organization-reasoning-2", "kind": "reasoning", "text": "确认配置字段与运行状态。", "phase": None},
                 {"id": "organization-command", "kind": "tool", "text": "rg -n pattern example.cpp\n找到对应处理分支", "phase": None},
                 {"id": "organization-command-2", "kind": "tool", "text": "查看相关函数实现", "phase": None},
                 {"id": "organization-answer", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n第二行可引用", "phase": "final_answer"},

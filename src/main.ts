@@ -5,11 +5,11 @@ import { marked } from 'marked';
 import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
-import { groupMessages, type MessageGroup } from './transcript';
+import { groupMessages, groupProcessMessages, type MessageGroup, type ProcessGroup } from './transcript';
 import { populateParameters, selectedParameters, updateThinking } from './task-options';
 import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
 import { openFilePicker, renderAttachments, type FileAttachment } from './files';
-import { annotationPrompt, openAnnotation, renderAnnotations, selectedMessageText, type TextSelection } from './chat-actions';
+import { annotationPrompt, createSelectionToolbar, openAnnotation, renderAnnotations } from './chat-actions';
 import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, ResponseAnnotation, Skill, Thread, Turn, TurnOptions } from './types';
 import './style.css';
 
@@ -99,6 +99,16 @@ let pending: { requestId: string; prompt: string; status?: string; error?: strin
 let cacheTimer: ReturnType<typeof setTimeout> | undefined;
 let cacheWriting = false;
 const pendingCache = new Map<string, { serverId: string; page: HistoryPage; revision: string | null }>();
+const selectionToolbar = createSelectionToolbar(element('messages'), (text, messageId, selection) => {
+  if (!selected || pending) return;
+  const chatId = selected.id;
+  openAnnotation(text, messageId, selection, '', annotation => {
+    if (selected?.id !== chatId) return;
+    selectedAnnotations.push(annotation);
+    localStorage.setItem(storageKey('annotations', chatId), JSON.stringify(selectedAnnotations));
+    renderChat();
+  });
+});
 
 function readStored<T>(key: string): T | null {
   const value = localStorage.getItem(key);
@@ -121,6 +131,7 @@ function clearRuntimeStatus(): void {
 }
 
 function showView(view: typeof currentView): void {
+  if (view !== currentView) selectionToolbar.dismiss();
   currentView = view;
   for (const name of views) element(`${name}-view`).hidden = name !== view;
   document.querySelector<HTMLElement>('.app-header')!.hidden = view === 'chat';
@@ -588,13 +599,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     node.dataset.messageId = message.id;
     const content = document.createElement('div');
     content.className = 'message-content';
-    if (message.kind === 'reasoning' || message.kind === 'tool') {
-      const details = document.createElement('details');
-      const summary = document.createElement('summary');
-      summary.textContent = message.kind === 'reasoning' ? '思考摘要' : '工具记录';
-      details.append(summary, content);
-      node.append(details);
-    } else node.append(content);
+    node.append(content);
     const attachments = document.createElement('div');
     attachments.className = 'message-attachments';
     node.append(attachments);
@@ -604,29 +609,6 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     const annotations = document.createElement('div');
     annotations.className = 'message-annotations';
     node.prepend(annotations);
-    if (message.kind === 'assistant') {
-      const quote = document.createElement('button');
-      quote.type = 'button';
-      quote.className = 'quiet quote-message';
-      quote.textContent = '添加到对话';
-      let selection: TextSelection | undefined;
-      quote.addEventListener('pointerdown', () => {
-        selection = selectedMessageText(content);
-      });
-      quote.addEventListener('click', () => {
-        if (!selected) return;
-        const chatId = selected.id;
-        openAnnotation(content.textContent ?? '', message.id, selection, '', annotation => {
-          if (selected?.id !== chatId) return;
-          selectedAnnotations.push(annotation);
-          localStorage.setItem(storageKey('annotations', chatId), JSON.stringify(selectedAnnotations));
-          renderChat();
-          messageInput.focus();
-        });
-        selection = undefined;
-      });
-      actions.append(quote);
-    }
     if (message.kind === 'user') {
       const edit = document.createElement('button');
       edit.type = 'button';
@@ -639,22 +621,28 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
   }
   node.classList.toggle('process-message', process);
   node.querySelector<HTMLElement>('.message-actions')!.hidden = process;
+  const content = node.querySelector<HTMLElement>('.message-content')!;
+  const details = node.querySelector<HTMLDetailsElement>(':scope > .message-record');
+  if (!process && (message.kind === 'reasoning' || message.kind === 'tool')) {
+    if (!details) {
+      const wrapper = document.createElement('details');
+      wrapper.className = 'message-record';
+      const summary = document.createElement('summary');
+      summary.textContent = message.kind === 'reasoning' ? '思考摘要' : '工具记录';
+      content.replaceWith(wrapper);
+      wrapper.append(summary, content);
+    }
+  } else details?.replaceWith(content);
   const questionText = message.questions?.map(question => [question.title, ...(question.options ?? []).map(option => `- ${option}`)].join('\n')).join('\n\n');
   const body = message.questionReplies?.length ? message.questionReplies.map(reply => `${reply.question}\n${reply.answer}`).join('\n\n')
     : questionText === message.text ? '' : message.text;
   if (node.dataset.body !== body) {
-    const content = node.querySelector<HTMLElement>('.message-content')!;
     content.hidden = !body;
     if (message.kind === 'user' || message.kind === 'tool') content.textContent = body;
     else content.innerHTML = DOMPurify.sanitize(marked.parse(body, { async: false }), { FORBID_TAGS: ['img', 'iframe', 'form'], FORBID_ATTR: ['style'] });
     node.dataset.body = body;
   }
   const edit = node.querySelector<HTMLButtonElement>('.edit-message');
-  const quote = node.querySelector<HTMLButtonElement>('.quote-message');
-  if (quote) {
-    quote.hidden = !body;
-    quote.disabled = Boolean(pending);
-  }
   renderAnnotations(node.querySelector<HTMLElement>('.message-annotations')!, message.responseAnnotations ?? []);
   renderAttachments(node.querySelector<HTMLElement>('.message-attachments')!, message.attachments ?? [], { client });
   if (edit) {
@@ -673,6 +661,29 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
       return { ...question, id, answer: answers.get(id), draft: questionDrafts.find(reply => reply.questionItemId === id)?.answer };
     }), { disabled: !connected || Boolean(pending) || Boolean(interaction) || Boolean(stopOperation), onSubmit: replies => void submitQuestionReplies(replies) });
   } else node.querySelector('.async-questions')?.remove();
+  return node;
+}
+
+function renderProcessRecords(group: ProcessGroup, turn: Turn, answers: Map<string, string>, used: Set<HTMLElement>): HTMLElement {
+  let node = group.messages.map(message => renderedMessages.get(`${turn.id}:${message.id}`)
+    ?.closest<HTMLDetailsElement>('.process-records')).find(node => node && !used.has(node));
+  if (!node) {
+    node = document.createElement('details');
+    node.className = 'process-records';
+    node.innerHTML = '<summary></summary><div class="record-messages"></div>';
+  }
+  used.add(node);
+  node.dataset.kind = group.kind!;
+  const label = group.kind === 'tool' ? '工具记录' : '思考摘要';
+  node.querySelector('summary')!.textContent = label + (group.messages.length > 1 ? `（${group.messages.length}）` : '');
+  const messages = node.querySelector<HTMLElement>('.record-messages')!;
+  let position = messages.firstElementChild;
+  for (const message of group.messages) {
+    const item = renderMessage(message, `${turn.id}:${message.id}`, answers, true);
+    if (item !== position) messages.insertBefore(item, position);
+    position = item.nextElementSibling;
+  }
+  while (position) { const next = position.nextElementSibling; position.remove(); position = next; }
   return node;
 }
 
@@ -696,8 +707,11 @@ function renderProcess(group: MessageGroup, turn: Turn, answers: Map<string, str
   preview.hidden = !preview.textContent;
   const messages = node.querySelector<HTMLElement>('.process-messages')!;
   let position = messages.firstElementChild;
-  for (const message of group.messages) {
-    const item = renderMessage(message, `${turn.id}:${message.id}`, answers, true);
+  const usedRecords = new Set<HTMLElement>();
+  for (const records of groupProcessMessages(group.messages)) {
+    const message = records.messages[0];
+    const item = records.kind ? renderProcessRecords(records, turn, answers, usedRecords)
+      : renderMessage(message, `${turn.id}:${message.id}`, answers, true);
     if (item !== position) messages.insertBefore(item, position);
     position = item.nextElementSibling;
   }
@@ -707,6 +721,7 @@ function renderProcess(group: MessageGroup, turn: Turn, answers: Map<string, str
 
 function renderChat(forceBottom = false): void {
   if (!selected) return;
+  selectionToolbar.setDisabled(Boolean(pending));
   const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
   element('chat-title').textContent = selected.title || '未命名对话';
   element('chat-title').title = selected.title || '未命名对话';
@@ -826,6 +841,7 @@ function renderChat(forceBottom = false): void {
   element('delivery-text').textContent = pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
   element('resolve-delivery').hidden = pending?.status !== 'unknown';
   if (forceBottom || atBottom) scroll.scrollTop = scroll.scrollHeight;
+  selectionToolbar.refresh();
 }
 
 function scheduleCache(): void {
@@ -1528,12 +1544,14 @@ if (Capacitor.getPlatform() === 'android') {
   void App.addListener('backButton', () => {
     const dialog = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].at(-1);
     if (dialog) dialog.close();
+    else if (selectionToolbar.dismiss()) return;
     else if (currentView === 'chat') backToInbox();
     else if (currentView === 'connection' && settingsReturnView) closeSettings();
     else void App.minimizeApp();
   });
   void App.addListener('appStateChange', ({ isActive }) => {
     foreground = isActive;
+    if (!isActive) selectionToolbar.dismiss();
     stopUpdates();
     if (isActive && currentView === 'chat') resumeChat();
     else if (isActive && currentView === 'inbox') void refreshInbox();

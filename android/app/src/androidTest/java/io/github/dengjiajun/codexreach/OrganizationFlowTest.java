@@ -5,6 +5,8 @@ import static org.junit.Assert.assertTrue;
 
 import android.graphics.Bitmap;
 import android.os.SystemClock;
+import android.view.MotionEvent;
+import android.view.ViewConfiguration;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -47,13 +49,7 @@ public class OrganizationFlowTest {
                 verifyPersistedDraftAndSend(webView);
             }
             InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(500, 10_000);
-            File screenshot = new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getExternalFilesDir(null), "verification-" + stage + ".png");
-            try (FileOutputStream output = new FileOutputStream(screenshot)) {
-                Bitmap bitmap = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
-                assertTrue("Screenshot capture failed", bitmap != null);
-                assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output));
-                bitmap.recycle();
-            }
+            captureScreenshot(stage);
         }
     }
 
@@ -80,6 +76,10 @@ public class OrganizationFlowTest {
         assertEquals("true", evaluate(webView, "!document.querySelector('[data-message-id=\"organization-answer\"]').closest('.turn-process')"));
         evaluate(webView, "document.querySelector('.turn-process > summary').click(); null");
         assertEquals("true", evaluate(webView, "document.querySelector('.turn-process').open && document.querySelector('.turn-process [data-message-id=\"organization-progress\"]')!==null"));
+        assertEquals("true", evaluate(webView, "document.querySelectorAll('.process-records[data-kind=tool]').length===1 && document.querySelectorAll('.process-records[data-kind=reasoning]').length===1 && [...document.querySelectorAll('.process-records')].every(group=>!group.open && group.querySelector('summary').textContent.includes('（2）'))"));
+        evaluate(webView, "document.querySelector('.process-records[data-kind=tool] > summary').click(); document.querySelector('.process-records[data-kind=reasoning] > summary').click(); null");
+        SystemClock.sleep(700);
+        assertEquals("true", evaluate(webView, "[...document.querySelectorAll('.process-records')].every(group=>group.open && group.querySelectorAll('.record-messages > .message').length===2 && !group.querySelector('.message details'))"));
         evaluate(webView, "document.querySelector('.turn-process > summary').click(); null");
     }
 
@@ -105,10 +105,22 @@ public class OrganizationFlowTest {
 
     private void verifyQuoteAndAttachments(WebView webView) throws Exception {
         setComposer(webView, "原有手机草稿");
-        evaluate(webView, "document.querySelector('[data-message-id=\"organization-answer\"] .quote-message').click(); null");
+        assertEquals("true", evaluate(webView, "document.querySelectorAll('.quote-message').length===0 && document.querySelector('#selection-toolbar').hidden"));
+        String source = "[data-message-id=\"organization-answer\"] .message-content";
+        evaluate(webView, "document.querySelector(" + JSONObject.quote(source) + ").scrollIntoView({block:'center'}); null");
+        pressElement(webView, source, true);
+        await(webView, "!document.querySelector('#selection-toolbar').hidden");
+        captureScreenshot("selection-popover");
+        pressElement(webView, "#selection-toolbar button", false);
         await(webView, "document.querySelector('#annotation-dialog')?.open");
-        assertEquals("true", evaluate(webView, "document.querySelector('#annotation-dialog [data-source-text]').readOnly && document.querySelector('#annotation-dialog [data-add]').disabled && document.querySelector('#message-input').value==='原有手机草稿'"));
-        evaluate(webView, "(()=>{const source=document.querySelector('#annotation-dialog [data-source-text]'); source.setSelectionRange(0,17); source.dispatchEvent(new Event('select')); document.querySelector('#annotation-dialog [data-comment]').value='只针对这一段核查'; document.querySelector('#annotation-dialog [data-add]').click()})(); null");
+        assertEquals("true", evaluate(webView, "Boolean(document.querySelector('#annotation-dialog [data-excerpt]').textContent.trim()) && !document.querySelector('#annotation-dialog .annotation-source').open"));
+        evaluate(webView, "document.querySelector('#annotation-dialog [data-back]').click(); null");
+        evaluate(webView, "(()=>{const content=document.querySelector(" + JSONObject.quote(source) + "); const range=document.createRange(); range.setStart(content.firstChild.firstChild,0); range.setEnd(content.firstChild.firstChild,17); const selected=window.getSelection(); selected.removeAllRanges(); selected.addRange(range)})(); null");
+        await(webView, "!document.querySelector('#selection-toolbar').hidden");
+        evaluate(webView, "document.querySelector('#selection-toolbar button').click(); null");
+        await(webView, "document.querySelector('#annotation-dialog')?.open");
+        assertEquals("true", evaluate(webView, "document.querySelector('#annotation-dialog [data-excerpt]').textContent==='QUOTE_SOURCE_LINE' && !document.querySelector('#annotation-dialog [data-add]').disabled && document.querySelector('#message-input').value==='原有手机草稿'"));
+        evaluate(webView, "document.querySelector('#annotation-dialog [data-comment]').value='只针对这一段核查'; document.querySelector('#annotation-dialog [data-add]').click(); null");
         await(webView, "!document.querySelector('#annotation-dialog') && document.querySelectorAll('#selected-annotations .annotation-card').length===1");
         assertEquals("true", evaluate(webView, "document.querySelector('#selected-annotations').textContent.includes('QUOTE_SOURCE_LINE') && document.querySelector('#selected-annotations').textContent.includes('只针对这一段核查')"));
         assertComposer(webView, QUOTED_DRAFT);
@@ -244,6 +256,34 @@ public class OrganizationFlowTest {
 
     private void clickNamedButton(WebView webView, String parent, String label) throws Exception {
         evaluate(webView, "[..." + parent + ".querySelectorAll('button')].find(button=>button.textContent===" + JSONObject.quote(label) + ").click(); null");
+    }
+
+    private void pressElement(WebView webView, String selector, boolean longPress) throws Exception {
+        String horizontal = longPress ? "Math.min(24,r.width/2)" : "r.width/2";
+        String vertical = longPress ? "Math.min(12,r.height/2)" : "r.height/2";
+        JSONObject point = new JSONObject(evaluate(webView, "(()=>{const r=document.querySelector(" + JSONObject.quote(selector) + ").getBoundingClientRect();return {x:(r.left+" + horizontal + ")*devicePixelRatio,y:(r.top+" + vertical + ")*devicePixelRatio}})()"));
+        int[] origin = new int[2];
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> webView.getLocationOnScreen(origin));
+        float x = (float) point.getDouble("x") + origin[0];
+        float y = (float) point.getDouble("y") + origin[1];
+        long downTime = SystemClock.uptimeMillis();
+        MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
+        InstrumentationRegistry.getInstrumentation().sendPointerSync(down);
+        down.recycle();
+        SystemClock.sleep(longPress ? ViewConfiguration.getLongPressTimeout() + 300 : 60);
+        MotionEvent up = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0);
+        InstrumentationRegistry.getInstrumentation().sendPointerSync(up);
+        up.recycle();
+    }
+
+    private void captureScreenshot(String name) throws Exception {
+        File screenshot = new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getExternalFilesDir(null), "verification-" + name + ".png");
+        try (FileOutputStream output = new FileOutputStream(screenshot)) {
+            Bitmap bitmap = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();
+            assertTrue("Screenshot capture failed", bitmap != null);
+            assertTrue(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output));
+            bitmap.recycle();
+        }
     }
 
     private void control(String name) throws Exception {
