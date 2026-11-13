@@ -53,7 +53,9 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#notice').textContent.includes('访问密钥无效') && !document.querySelector('#connect-button').disabled");
                 evaluate(webView, "document.querySelector('#cancel-settings').click(); null");
                 await(webView, "!document.querySelector('#chat-view').hidden");
-                assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿' && Math.abs(document.querySelector('#messages-scroll').scrollTop-window.savedScrollTop)<2"));
+                assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
+                assertEquals("Reading position " + evaluate(webView, "JSON.stringify({saved:window.savedScrollTop,actual:document.querySelector('#messages-scroll').scrollTop})"),
+                    "true", evaluate(webView, "Math.abs(document.querySelector('#messages-scroll').scrollTop-window.savedScrollTop)<2"));
                 evaluate(webView, "document.querySelector('#chat-settings-button').click(); document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "!document.querySelector('#chat-view').hidden");
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));

@@ -46,6 +46,8 @@ const messageAnnotations = new Map<string, ResponseAnnotation[]>();
 let currentView: typeof views[number] = 'connection';
 let settingsReturnView: 'inbox' | 'chat' | null = null;
 let settingsScrollTop = 0;
+let followLatest = true;
+let restoringScroll: number | null = null;
 let connectionAttempt = 0;
 let inboxRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let connectionError = '';
@@ -182,6 +184,7 @@ function stopUpdates(): void {
 
 function resumeChat(): void {
   if (!selected || !foreground) return;
+  restoringScroll = scroll.scrollTop;
   stopUpdates();
   revision = null;
   clearRuntimeStatus();
@@ -198,6 +201,7 @@ function openSettings(): void {
   if (currentView === 'connection') return;
   settingsReturnView = currentView;
   settingsScrollTop = scroll.scrollTop;
+  followLatest = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 2;
   stopUpdates();
   urlInput.value = connection?.url ?? '';
   keyInput.value = connection?.key ?? '';
@@ -632,6 +636,8 @@ async function reportReadError(error: unknown, token: number, kind: 'history' | 
 }
 
 async function openChat(id: string, pinned?: boolean): Promise<void> {
+  followLatest = true;
+  restoringScroll = null;
   readAttempts.delete(id);
   stopUpdates();
   const token = generation;
@@ -957,7 +963,7 @@ function renderProcess(group: MessageGroup, turn: Turn, answers: Map<string, str
 function renderChat(forceBottom = false): void {
   if (!selected) return;
   selectionToolbar.setDisabled(Boolean(pending));
-  const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
+  const previousTop = scroll.scrollTop;
   element('chat-title').textContent = threadTitle(selected);
   element('chat-title').title = threadTitle(selected);
   element('chat-meta').textContent = [selected.cwd, liveModel, liveThinking].filter(Boolean).join(' · ');
@@ -1107,7 +1113,10 @@ function renderChat(forceBottom = false): void {
   element('delivery-note').hidden = !pending;
   element('delivery-text').textContent = pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
   element('resolve-delivery').hidden = pending?.status !== 'unknown';
-  if (forceBottom || atBottom) scroll.scrollTop = scroll.scrollHeight;
+  if (restoringScroll !== null && !forceBottom) scroll.scrollTop = restoringScroll;
+  else if (forceBottom || followLatest) scroll.scrollTop = scroll.scrollHeight;
+  else scroll.scrollTop = previousTop;
+  if (!syncing) restoringScroll = null;
   updateReadingActions();
   selectionToolbar.refresh();
 }
@@ -1434,7 +1443,7 @@ async function pollCreation(): Promise<void> {
   }
 }
 
-async function openParameters(): Promise<void> {
+async function openParameters(draft = turnOptions): Promise<void> {
   if (!client || !connection || !selected) return;
   const request = ++dialogRequest;
   const optionsClient = client;
@@ -1445,19 +1454,20 @@ async function openParameters(): Promise<void> {
   const hasLiveSettings = runtimeStatus !== null && liveModel && liveThinking;
   element('options-current').textContent = hasLiveSettings ? `当前会话使用 ${liveModel} · ${liveThinking}` : '正在读取会话参数…';
   showFormError('options-error');
-  populateParameters(optionsModel, optionsThinking, modelChoices, turnOptions, '沿用会话设置');
+  populateParameters(optionsModel, optionsThinking, modelChoices, draft, '沿用会话设置');
   optionsModel.disabled = !modelChoices.length;
   element<HTMLButtonElement>('save-options').disabled = !modelChoices.length;
   element('options-catalog-status').hidden = false;
   element('options-catalog-status').textContent = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   optionsDialog.showModal();
   element('approval-policy-label').hidden = true;
+  element('open-approval-chat').hidden = true;
   element('approval-policy-status').textContent = '正在读取审批策略…';
   const policy = element<HTMLSelectElement>('approval-policy');
   policy.dataset.original = ''; policy.replaceChildren();
   void optionsClient.request<{ available: boolean; approvalPolicy: unknown; allowed: unknown[] | null }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
     if (!current()) return;
-    if (!settings.available) { element('approval-policy-status').textContent = '桌面加载该对话后可设置审批策略'; return; }
+    if (!settings.available) { element('approval-policy-status').textContent = '桌面加载该对话后可设置审批策略'; element('open-approval-chat').hidden = false; return; }
     const original = typeof settings.approvalPolicy === 'string' ? settings.approvalPolicy : '__custom__';
     const labels: Record<string, string> = { untrusted: '仅信任操作自动执行', 'on-request': '由模型请求审批', never: '不请求审批' };
     for (const [value, label] of Object.entries(labels)) if (!settings.allowed || settings.allowed.includes(value) || value === original) {
@@ -1478,7 +1488,7 @@ async function openParameters(): Promise<void> {
   try {
     const models = await optionsClient.loadModels();
     if (!current()) return;
-    const options = modelChoices.length ? selectedParameters(optionsModel, optionsThinking) : turnOptions;
+    const options = modelChoices.length ? selectedParameters(optionsModel, optionsThinking) : draft;
     modelChoices = models;
     populateParameters(optionsModel, optionsThinking, modelChoices, options, '沿用会话设置');
     optionsModel.disabled = false;
@@ -1742,6 +1752,17 @@ element('resolve-create').addEventListener('click', () => {
   saveNewChatDraft();
 });
 element('parameters-button').addEventListener('click', () => void openParameters());
+element('open-approval-chat').addEventListener('click', async () => {
+  if (!client || !selected) return;
+  const id = selected.id;
+  const draft = selectedParameters(optionsModel, optionsThinking);
+  const button = element<HTMLButtonElement>('open-approval-chat'); button.disabled = true;
+  try {
+    await client.request(`/threads/${encodeURIComponent(id)}/open`, 'POST', {});
+    if (selected?.id === id && optionsDialog.open) await openParameters(draft);
+  } catch (error) { showFormError('options-error', errorText(error)); }
+  finally { button.disabled = false; }
+});
 element('skills-button').addEventListener('click', () => openContext());
 element('new-context-button').addEventListener('click', () => openContext(true));
 bindMention(messageInput, picked => openContext(false, picked));
@@ -1977,9 +1998,15 @@ function resizeInput(): void {
   messageInput.style.height = `${Math.min(limit, messageInput.scrollHeight)}px`;
 }
 window.visualViewport?.addEventListener('resize', resizeInput);
-scroll.addEventListener('scroll', updateReadingActions, { passive: true });
+scroll.addEventListener('scroll', () => {
+  if (currentView === 'chat') {
+    followLatest = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 2;
+    if (restoringScroll !== null) restoringScroll = scroll.scrollTop;
+  }
+  updateReadingActions();
+}, { passive: true });
 new ResizeObserver(updateReadingActions).observe(element('messages'));
-element('jump-latest').addEventListener('click', () => { scroll.scrollTop = scroll.scrollHeight; updateReadingActions(); });
+element('jump-latest').addEventListener('click', () => { restoringScroll = null; followLatest = true; scroll.scrollTop = scroll.scrollHeight; updateReadingActions(); });
 element('jump-requests').addEventListener('click', () => element('requests').scrollIntoView({ block: 'start' }));
 messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
