@@ -113,6 +113,31 @@ impl Queue {
         Ok(db.execute("UPDATE queue SET status='sending',error=NULL WHERE request_id=?1 AND status='queued' AND version=?2", params![item.request_id,item.version])? == 1)
     }
 
+    pub fn can_dispatch(&self, id: &str) -> Result<bool> {
+        let db = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("队列数据库锁不可用"))?;
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM queue WHERE request_id=?1 AND status='sending')",
+            [id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn cancel_deleted(&self, ids: &[String]) -> Result<()> {
+        let mut db = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("队列数据库锁不可用"))?;
+        let transaction = db.transaction()?;
+        for id in ids {
+            transaction.execute("UPDATE queue SET status='cancelled',error='对话已删除',version=version+1 WHERE chat_id=?1 AND status NOT IN ('accepted','cancelled')", [id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn finish(&self, id: &str, status: &str, error: Option<&str>) -> Result<()> {
         let db = self
             .0
@@ -339,5 +364,27 @@ mod tests {
         assert!(!queue.claim(&items[1]).unwrap());
         drop(queue);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn deletion_prevents_a_claimed_message_from_dispatching_after_the_send_lock() {
+        let queue = Queue::open(FilePath::new(":memory:")).unwrap();
+        queue
+            .add(
+                "chat",
+                &crate::SendRequest {
+                    request_id: "id".into(),
+                    prompt: "message".into(),
+                    options: TurnOptions::default(),
+                },
+            )
+            .unwrap();
+        let item = queue.list(None).unwrap().remove(0);
+        assert!(queue.claim(&item).unwrap());
+        assert!(queue.can_dispatch("id").unwrap());
+        queue.cancel_deleted(&["chat".into()]).unwrap();
+        assert!(!queue.can_dispatch("id").unwrap());
+        queue.finish("id", "accepted", None).unwrap();
+        assert_eq!(queue.list(None).unwrap()[0].status, "cancelled");
     }
 }

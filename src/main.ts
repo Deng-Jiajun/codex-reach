@@ -431,7 +431,12 @@ function openThreadMenu(thread: Thread): void {
 
 async function invalidateChats(ids: string[]): Promise<void> {
   if (!connection) return;
-  if (selected && ids.includes(selected.id)) { stopUpdates(); selected = null; }
+  if (selected && ids.includes(selected.id)) {
+    stopUpdates(); selected = null;
+    renderedMessages.clear(); element('messages').replaceChildren();
+  }
+  const last = localStorage.getItem(storageKey('last-chat'));
+  if (last && ids.includes(last)) localStorage.removeItem(storageKey('last-chat'));
   for (const id of ids) pendingCache.delete(`${connection.serverId}:${id}`);
   await cache.remove(connection.serverId, ids);
   threads = threads.filter(thread => !ids.includes(thread.id));

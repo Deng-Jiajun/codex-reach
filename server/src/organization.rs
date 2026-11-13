@@ -106,13 +106,44 @@ pub async fn delete(
         .reserve(&input.request_id, "delete", &id, "", &options)?;
     if fresh {
         tokio::spawn(async move {
-            let result = state
-                .tools
-                .call(
-                    "delete_thread",
-                    json!({"source":"codex","hostId":"local","threadId":id}),
-                )
-                .await;
+            let result = async {
+                let ids = current["threads"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|thread| thread["id"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>();
+                let gates = {
+                    let mut locks = state.send_locks.lock().await;
+                    ids.iter()
+                        .map(|id| {
+                            locks
+                                .entry(id.clone())
+                                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                                .clone()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut guards = Vec::new();
+                for gate in gates {
+                    guards.push(gate.lock_owned().await);
+                }
+                let result = state
+                    .tools
+                    .call(
+                        "delete_thread",
+                        json!({"source":"codex","hostId":"local","threadId":id}),
+                    )
+                    .await?;
+                state.queue.cancel_deleted(&ids)?;
+                if let Ok(client) = state.ipc().await {
+                    for id in &ids {
+                        client.forget(id).await;
+                    }
+                }
+                Ok(result)
+            }
+            .await;
             if state.outbox.finish(&input.request_id, result).is_err() {
                 eprintln!("无法保存删除结果");
             }

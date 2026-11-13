@@ -48,6 +48,8 @@ public class ReaderActivity extends Activity {
     private boolean full;
     private volatile boolean closed;
     private boolean pdfLoading;
+    private boolean backRegistered;
+    private final android.window.OnBackInvokedCallback webBack = () -> web.goBack();
     private float gestureStart;
 
     private Button button(String label, Runnable action) {
@@ -134,6 +136,13 @@ public class ReaderActivity extends Activity {
             }
         });
         web.setWebViewClient(new WebViewClient() {
+            @Override public void onPageFinished(WebView view, String address) {
+                boolean canGoBack = view.canGoBack();
+                if (canGoBack == backRegistered) return;
+                if (canGoBack) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, webBack);
+                else getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(webBack);
+                backRegistered = canGoBack;
+            }
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String scheme = request.getUrl().getScheme();
                 if ("http".equals(scheme) || "https".equals(scheme)) return false;
@@ -238,13 +247,9 @@ public class ReaderActivity extends Activity {
         });
     }
 
-    @Override public void onBackPressed() {
-        if (web != null && web.canGoBack()) web.goBack();
-        else super.onBackPressed();
-    }
-
     @Override protected void onDestroy() {
         closed = true;
+        if (backRegistered) getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(webBack);
         if (web != null) web.destroy();
         if (bitmap != null) bitmap.recycle();
         worker.execute(() -> {

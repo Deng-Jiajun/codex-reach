@@ -53,6 +53,11 @@ def binary(handler, body, content_type):
     handler.wfile.write(body)
 
 
+def file_bytes(organization, source, fallback):
+    content = organization["uploadedData"].get(source, fallback)
+    return base64.b64decode(content) if isinstance(content, str) else content
+
+
 def get(handler, url, organization, files, png):
     global event_reads
     path = url.path
@@ -69,9 +74,9 @@ def get(handler, url, organization, files, png):
         elif name.endswith(".pdf"):
             binary(handler, pdf_bytes(), "application/pdf")
         elif name.endswith(".png"):
-            binary(handler, organization["uploadedData"].get(source, png), "image/png")
+            binary(handler, file_bytes(organization, source, png), "image/png")
         else:
-            binary(handler, organization["uploadedData"].get(source, b"READER_TEXT_CHECK\n"), "text/plain; charset=utf-8")
+            binary(handler, file_bytes(organization, source, b"READER_TEXT_CHECK\n"), "text/plain; charset=utf-8")
     elif path == "/api/context":
         if parse_qs(url.query).get("kind", [""])[0] == "skills":
             handler.reply({"skills": [{"name": "interaction-check", "path": "C:\\Skills\\interaction-check\\SKILL.md", "description": "精确协议与交互核对"}, {"name": "review-only", "path": "C:\\Skills\\review-only\\SKILL.md", "description": "只读代码审查"}], "errors": []})
@@ -124,7 +129,7 @@ def post(handler, organization, files, png):
         token = str(uuid.uuid4())
         grants[token] = source
         organization["previewRequests"].append({"path": source})
-        content = organization["uploadedData"].get(source, png if kind == "image" else pdf_bytes() if kind == "pdf" else b"READER_TEXT_CHECK\n")
+        content = file_bytes(organization, source, png if kind == "image" else pdf_bytes() if kind == "pdf" else b"READER_TEXT_CHECK\n")
         handler.reply({"name": name, "size": len(content), "kind": kind, "prefix": f"/reader/{token}/", "relative": name})
     elif path == "/api/uploads":
         uploads.setdefault(data["id"], {**data, "offset": 0, "attachment": None, "data": bytearray()})

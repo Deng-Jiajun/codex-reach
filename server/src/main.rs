@@ -103,6 +103,9 @@ impl AppState {
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone();
         let _guard = gate.lock().await;
+        if next_turn_only && !self.queue.can_dispatch(request_id)? {
+            return Err(NotDispatched("队列项已取消".to_owned()).into());
+        }
         if !options.skills.is_empty() {
             let catalog = self
                 .skill_catalog(chat_id)

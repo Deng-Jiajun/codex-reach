@@ -86,7 +86,11 @@ public class MobileUpgradeTest {
         clickText(reader, "展开");
         awaitCondition(() -> windowRatio(reader) > .85, "reader expanded");
         screenshot("reader-html");
-        clickText(reader, "关闭");
+        evaluate(document, "location.href='next.html';null");
+        await(document, "location.href.endsWith('/next.html') && document.querySelector('h1')?.textContent==='READER_HTML'");
+        shell("input keyevent KEYCODE_BACK");
+        await(document, "location.href.endsWith('/mobile.html')");
+        shell("input keyevent KEYCODE_BACK");
         await(web, "document.querySelector('#message-input').value==='READER_DRAFT_RETAINED'");
         evaluate(web, "[...document.querySelectorAll('.message-content a')].find(link=>link.textContent==='PDF 阅读').click();null");
         ReaderActivity pdf = awaitReader("pdf");
