@@ -141,6 +141,7 @@ jobs:
             done;
             adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-html.png artifacts/;
             adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-pdf.png artifacts/;
+            adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-keyboard-composer.png artifacts/;
             curl --fail --silent http://127.0.0.1:4320/control/organization-stats > artifacts/organization-stats.json
             '
       - name: Upload APK and verification results

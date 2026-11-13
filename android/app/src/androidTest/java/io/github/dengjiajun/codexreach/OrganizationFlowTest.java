@@ -6,7 +6,9 @@ import static org.junit.Assert.assertTrue;
 import android.graphics.Bitmap;
 import android.os.SystemClock;
 import android.view.MotionEvent;
+import android.view.KeyEvent;
 import android.view.ViewConfiguration;
+import android.view.WindowInsets;
 import android.webkit.WebView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -183,7 +185,38 @@ public class OrganizationFlowTest {
         assertTrue(stats().getJSONArray("previewRequests").length() >= 3);
         assertEquals(3, stats().getJSONArray("resolveRequests").length());
         assertComposer(webView, QUOTED_DRAFT);
+        verifyKeyboardComposer(webView);
         SystemClock.sleep(800);
+    }
+
+    private void verifyKeyboardComposer(WebView webView) throws Exception {
+        pressElement(webView, "#message-input", false);
+        awaitKeyboard(webView, true);
+        setComposer(webView, "长输入与多附件键盘验证\n".repeat(40));
+        assertEquals("true", evaluate(webView, "document.querySelector('#message-input').getBoundingClientRect().height<=161 && document.querySelectorAll('#selected-files .attachment-chip').length===4"));
+        evaluate(webView, "document.querySelector('#expand-input').click();document.querySelector('.composer-area').scrollTop=100000;null");
+        await(webView, "document.querySelector('#expand-input').getAttribute('aria-expanded')==='true' && document.querySelector('#message-input').getBoundingClientRect().height>160");
+        assertEquals("true", evaluate(webView, "(()=>{const rect=document.querySelector('#send-button').getBoundingClientRect();return rect.top>=visualViewport.offsetTop && rect.bottom<=visualViewport.offsetTop+visualViewport.height+1 && document.documentElement.scrollWidth<=innerWidth})()"));
+        captureScreenshot("keyboard-composer");
+        evaluate(webView, "document.querySelector('#expand-input').click();null");
+        setComposer(webView, QUOTED_DRAFT);
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+        awaitKeyboard(webView, false);
+        assertComposer(webView, QUOTED_DRAFT);
+        evaluate(webView, "document.querySelector('.composer-area').scrollTop=0;null");
+    }
+
+    private void awaitKeyboard(WebView webView, boolean visible) throws InterruptedException {
+        long deadline = SystemClock.elapsedRealtime() + 15000;
+        AtomicReference<Boolean> shown = new AtomicReference<>(!visible);
+        while (shown.get() != visible) {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+                WindowInsets insets = webView.getRootWindowInsets();
+                shown.set(insets != null && insets.isVisible(WindowInsets.Type.ime()));
+            });
+            assertTrue("Timed out waiting for keyboard visibility " + visible, SystemClock.elapsedRealtime() < deadline);
+            SystemClock.sleep(150);
+        }
     }
 
     private void verifyPersistedDraftAndSend(WebView webView) throws Exception {
