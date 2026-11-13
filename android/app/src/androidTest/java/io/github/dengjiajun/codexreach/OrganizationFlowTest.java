@@ -178,7 +178,7 @@ public class OrganizationFlowTest {
         await(webView, "!document.querySelector('.files-dialog')");
         evaluate(webView, "document.querySelector('#manage-files').click(); null");
         await(webView, "document.querySelector('.attachment-manager')?.open");
-        evaluate(webView, "document.querySelector('.attachment-manager [aria-label=\"移除附件 large.bin\"]').click(); document.querySelector('.attachment-manager .dialog-header button').click(); null");
+        evaluate(webView, "document.querySelector('.attachment-manager [aria-label=\"移除附件 large.bin\"]').click(); document.querySelector('.attachment-manager .dialog-close').click(); null");
         await(webView, "document.querySelectorAll('#selected-files .attachment-chip').length===4");
         evaluate(webView, "document.querySelector('#selected-files [aria-label=\"预览图片 mobile.png\"]').click(); null");
         verifyPreview(webView, "mobile.png");
@@ -284,7 +284,7 @@ public class OrganizationFlowTest {
     private void verifyPreview(WebView webView, String name) throws Exception {
         await(webView, "document.querySelector('.reader-dialog')?.open && document.querySelector('.reader-image')?.complete && document.querySelector('.reader-image').naturalWidth===1");
         assertEquals("true", evaluate(webView, "document.querySelector('.reader-image').alt===" + JSONObject.quote(name)));
-        evaluate(webView, "document.querySelector('.reader-dialog .dialog-header button').click(); null");
+        evaluate(webView, "document.querySelector('.reader-dialog .dialog-close').click(); null");
         await(webView, "!document.querySelector('.reader-dialog')");
     }
 
