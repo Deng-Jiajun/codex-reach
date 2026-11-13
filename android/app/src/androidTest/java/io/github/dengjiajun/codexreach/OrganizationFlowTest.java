@@ -173,7 +173,9 @@ public class OrganizationFlowTest {
         assertEquals(70, uploads.getJSONObject(0).getInt("size"));
         assertEquals(20 * 1024 * 1024 + 1, uploads.getJSONObject(1).getInt("size"));
         assertComposer(webView, QUOTED_DRAFT);
-        evaluate(webView, "document.querySelector('.files-dialog .dialog-header button').click(); document.querySelector('#manage-files').click(); null");
+        await(webView, "!document.querySelector('.files-dialog')");
+        evaluate(webView, "document.querySelector('#manage-files').click(); null");
+        await(webView, "document.querySelector('.attachment-manager')?.open");
         evaluate(webView, "document.querySelector('.attachment-manager [aria-label=\"移除附件 large.bin\"]').click(); document.querySelector('.attachment-manager .dialog-header button').click(); null");
         await(webView, "document.querySelectorAll('#selected-files .attachment-chip').length===4");
         evaluate(webView, "document.querySelector('#selected-files [aria-label=\"预览图片 mobile.png\"]').click(); null");
