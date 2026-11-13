@@ -1,3 +1,4 @@
+import { showDialog } from './ui';
 import type { ReachClient } from './api';
 import { uploadFiles, renderUploadTasks } from './uploads';
 import { computerImage, displayImage, saveImage, openReader } from './reader';
@@ -176,7 +177,7 @@ export function openFilePicker(client: ReachClient, initialPath: string, onSelec
     uploadFiles(client, draftKey, files);
     dialog.close();
   });
-  dialog.showModal();
+  showDialog(dialog);
   if (imagesOnly) {
     pathForm.hidden = true;
     navigation.hidden = true;
@@ -265,7 +266,7 @@ export function openPreview(attachment: MessageAttachment, client?: ReachClient 
   });
   picture.addEventListener('error', () => { if (dialog.open) showFailure('图片无法显示，请重试'); });
   retry.addEventListener('click', () => void load());
-  dialog.showModal();
+  showDialog(dialog);
   void load();
 }
 
@@ -345,7 +346,7 @@ export function openAttachmentManager(attachments: FileAttachment[], client: Rea
     dialog.addEventListener('close', () => window.removeEventListener('reach-uploads', refresh), { once: true });
     dialog.append(uploads);
   }
-  dialog.showModal();
+  showDialog(dialog);
 }
 
 export function renderAttachments(container: HTMLElement, attachments: MessageAttachment[], options: AttachmentOptions): void {

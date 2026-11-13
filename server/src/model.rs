@@ -777,6 +777,12 @@ pub fn stream_view(state: &Value) -> Value {
             .as_str().map(Value::from).unwrap_or_else(|| state["latestModel"].clone()),
         "thinking": state["latestReasoningEffort"],
         "approvalPolicy":state["latestThreadSettings"]["approvalPolicy"],
+        "permissionSettings": {
+            "approvalPolicy": state["latestThreadSettings"]["approvalPolicy"],
+            "approvalsReviewer": state["latestThreadSettings"]["approvalsReviewer"],
+            "permissions": state["latestThreadSettings"]["permissions"],
+            "activePermissionProfile": state["latestThreadSettings"]["activePermissionProfile"],
+        },
         "title": state["title"],
         "waiting": !requests.is_empty(),
         "waitingForUser":waiting_for_user,
@@ -888,6 +894,15 @@ mod tests {
             "latestReasoningEffort":"high"}));
         assert_eq!(selected["model"], "selected-model");
         assert_eq!(selected["thinking"], "high");
+        let permissions = json!({
+            "activePermissionProfile":{"id":":workspace","extends":null},
+            "approvalPolicy":"on-request",
+            "approvalsReviewer":"auto_review",
+            "permissions":":workspace"
+        });
+        let selected = stream_view(&json!({"latestThreadSettings":permissions}));
+        assert_eq!(selected["permissionSettings"], permissions);
+        assert_eq!(selected["approvalPolicy"], "on-request");
     }
 
     #[test]

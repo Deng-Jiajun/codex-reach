@@ -23,3 +23,29 @@ test('status grouping uses explicit waiting evidence and hides idle labels', () 
   assert.equal(threadTitle(chat('a', 0)), '未命名对话');
   assert.equal(threadTitle(chat('a', 0, { title: '已有标题' })), '已有标题');
 });
+
+test('project identity and Windows directory spelling share one project group', () => {
+  const groups = groupThreads([
+    chat('with-project', 1, { projectId: 'pc', cwd: 'D:\\Projects\\pc' }),
+    chat('directory-only', 2, { cwd: 'd:/projects/PC/' }),
+    chat('second-id', 3, { projectId: 'pc-alias', cwd: 'D:/Projects/pc' }),
+  ], [
+    { id: 'pc', name: 'pc', path: 'D:\\Projects\\pc' },
+    { id: 'pc-alias', name: 'pc', path: 'd:/projects/pc/' },
+  ], 'project');
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].title, 'pc');
+  assert.deepEqual(groups[0].threads.map(thread => thread.id), ['second-id', 'directory-only', 'with-project']);
+});
+
+test('same directory names in different roots remain distinguishable', () => {
+  const groups = groupThreads([
+    chat('one', 1, { cwd: 'D:/Projects/pc' }),
+    chat('two', 2, { cwd: 'E:/Projects/pc' }),
+    chat('linux-upper', 3, { cwd: '/home/PC' }),
+    chat('linux-lower', 4, { cwd: '/home/pc' }),
+  ], [], 'project');
+  assert.equal(groups.length, 4);
+  assert.ok(groups.some(group => group.title === 'pc · D:/Projects/pc'));
+  assert.ok(groups.some(group => group.title === 'pc · E:/Projects/pc'));
+});

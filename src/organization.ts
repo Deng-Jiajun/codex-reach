@@ -1,3 +1,4 @@
+import { showDialog } from './ui';
 import { ReachClient, ReachError } from './api';
 import { openReader } from './reader';
 import { threadTitle } from './thread-list';
@@ -9,7 +10,7 @@ function dialog(title: string): { root: HTMLDialogElement; body: HTMLElement; st
   root.querySelector('h2')!.textContent = title;
   root.querySelector('button')!.addEventListener('click', () => root.close());
   root.addEventListener('close', () => root.remove(), { once: true });
-  document.body.append(root); root.showModal();
+  document.body.append(root); showDialog(root);
   return { root, body: root.querySelector('.organization-content')!, status: root.querySelector('p')! };
 }
 

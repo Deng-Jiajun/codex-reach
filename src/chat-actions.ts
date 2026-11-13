@@ -1,3 +1,4 @@
+import { showDialog } from './ui';
 import type { ResponseAnnotation } from './types';
 import { sourceText, rangeOffsets } from './message-content';
 
@@ -130,7 +131,7 @@ export function openAnnotationDetail(annotation: ResponseAnnotation, index: numb
   dialog.append(header, body);
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
   document.body.append(dialog);
-  dialog.showModal();
+  showDialog(dialog);
 }
 
 export function openAnnotation(text: string, messageId: string, selection: TextSelection | undefined,
@@ -180,7 +181,7 @@ export function openAnnotation(text: string, messageId: string, selection: TextS
   });
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
   document.body.append(dialog);
-  dialog.showModal();
+  showDialog(dialog);
   if (source.open) input.focus();
   else opinion.focus();
   input.setSelectionRange(selection?.startOffset ?? 0, selection?.endOffset ?? 0);

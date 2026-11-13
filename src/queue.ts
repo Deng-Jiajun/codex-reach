@@ -1,3 +1,4 @@
+import { showDialog } from './ui';
 import type { ReachClient } from './api';
 import type { ModelChoice, ResponseAnnotation, TurnOptions } from './types';
 import { openContextPicker, bindMention } from './context-picker';
@@ -68,13 +69,13 @@ export function openQueue(client: ReachClient, chatId: string, cwd: string, chan
     if (dialog.open) timer = setTimeout(() => void refresh(), 2000);
   }
   dialog.addEventListener('close', () => { clearTimeout(timer); dialog.remove(); }, { once: true });
-  document.body.append(dialog); dialog.showModal(); void refresh();
+  document.body.append(dialog); showDialog(dialog); void refresh();
 }
 
 function openQueueEditor(client: ReachClient, item: QueueItem, cwd: string, saved: () => void): void {
   const editable = ['queued', 'failed'].includes(item.status);
   const dialog = document.createElement('dialog'); dialog.className = 'task-dialog';
-  dialog.innerHTML = '<div class="dialog-header"><button class="quiet" type="button">返回</button><h2>队列内容</h2></div><form><div class="composer-tools"><button class="quiet queue-files" type="button">＋</button><button class="quiet queue-context" type="button">@</button></div><div class="field-pair"><label>模型<select class="queue-model"></select></label><label>思考深度<select class="queue-thinking"></select></label></div><div class="queue-contexts"></div><button class="quiet queue-manage" type="button">附件</button><div class="queue-annotations"></div><label>消息<textarea rows="5"></textarea></label><p class="form-error" role="status"></p><button class="primary queue-save" type="submit">保存队列</button></form>';
+  dialog.innerHTML = '<div class="dialog-header"><button class="quiet" type="button">返回</button><h2>队列内容</h2></div><form><div class="composer-tools"><button class="quiet queue-files" type="button">＋</button></div><div class="field-pair"><label>模型<select class="queue-model"></select></label><label>思考深度<select class="queue-thinking"></select></label></div><div class="queue-contexts"></div><button class="quiet queue-manage" type="button">附件</button><div class="queue-annotations"></div><label>消息<textarea rows="5"></textarea></label><p class="form-error" role="status"></p><button class="primary queue-save" type="submit">保存队列</button></form>';
   const input = dialog.querySelector('textarea')!;
   const model = dialog.querySelector<HTMLSelectElement>('.queue-model')!;
   const thinking = dialog.querySelector<HTMLSelectElement>('.queue-thinking')!;
@@ -120,7 +121,6 @@ function openQueueEditor(client: ReachClient, item: QueueItem, cwd: string, save
       picked(); render();
     });
   }
-  dialog.querySelector('.queue-context')!.addEventListener('click', () => context());
   if (editable) bindMention(input, context);
   dialog.querySelector('.queue-files')!.addEventListener('click', () => openFilePicker(client, cwd, files => {
     const current = JSON.parse(localStorage.getItem(key) ?? '[]') as FileAttachment[];
@@ -146,7 +146,7 @@ function openQueueEditor(client: ReachClient, item: QueueItem, cwd: string, save
   render();
   window.addEventListener('reach-uploads', render);
   dialog.addEventListener('close', () => { window.removeEventListener('reach-uploads', render); dialog.remove(); }, { once: true });
-  document.body.append(dialog); dialog.showModal();
+  document.body.append(dialog); showDialog(dialog);
   void client.loadModels().then(result => {
     if (!dialog.open) return;
     const current = models.length ? selectedParameters(model, thinking) : options;

@@ -1,3 +1,4 @@
+import { showDialog, setIcon, setAction, type Icon } from './ui';
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { renderMarkdown, copyText, sourceText, sourceRange, rangeOffsets } from './message-content';
@@ -9,7 +10,7 @@ import { populateParameters, selectedParameters, updateThinking } from './task-o
 import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
 import { openFilePicker, openAttachmentManager, renderAttachments, type FileAttachment } from './files';
 import { recoverUploads, uploadCount } from './uploads';
-import { groupThreads, threadTitle, type Grouping } from './thread-list';
+import { groupThreads, threadTitle, threadProject, directoryKey, type Grouping } from './thread-list';
 import { openReader } from './reader';
 import { openContextPicker, bindMention } from './context-picker';
 import { openQueue, type QueueItem } from './queue';
@@ -20,7 +21,27 @@ import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelCho
 import './style.css';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+let sendMode: 'immediate' | 'queue' = 'immediate';
 const views = ['connection', 'inbox', 'chat'] as const;
+for (const [id, glyph, label] of [
+  ['search-button', 'search', '搜索对话和项目'],
+  ['files-button', 'plus', '添加内容'],
+  ['new-files-button', 'plus', '添加内容'],
+  ['expand-input', 'expand', '展开输入框'],
+  ['new-expand-input', 'expand', '展开输入框'],
+  ['create-chat-button', 'send', '创建并发送'],
+  ['jump-latest', 'down', '回到最新'],
+  ['jump-requests', 'unread', '查看待处理'],
+  ['send-mode-button', 'chevron', '选择发送方式'],
+] as const) setIcon(element(id), glyph, label);
+
+element('search-button').addEventListener('click', () => {
+  const panel = element('list-search');
+  panel.hidden = !panel.hidden;
+  element('search-button').setAttribute('aria-expanded', String(!panel.hidden));
+  if (!panel.hidden) searchInput.focus();
+  else { searchInput.value = ''; renderInbox(); }
+});
 const notice = element<HTMLParagraphElement>('notice');
 const urlInput = element<HTMLInputElement>('server-url');
 const keyInput = element<HTMLInputElement>('server-key');
@@ -309,7 +330,11 @@ async function loadInbox(token: number): Promise<void> {
   nextThreads = threadResult.nextCursor;
   const selectedProject = projectFilter.value;
   projectFilter.replaceChildren(new Option('全部项目', ''), new Option('无项目', '__none__'));
-  for (const project of projects) projectFilter.add(new Option(project.name, project.id));
+  for (const project of projects) {
+    if ([...projectFilter.options].some(option => directoryKey(projects.find(item => item.id === option.value)?.path ?? '') === directoryKey(project.path))) continue;
+    const repeated = projects.some(item => item.name === project.name && directoryKey(item.path) !== directoryKey(project.path));
+    projectFilter.add(new Option(repeated ? `${project.name} · ${project.path}` : project.name, project.id));
+  }
   projectFilter.value = selectedProject;
   renderInbox();
   void refreshThreadStates(token);
@@ -371,7 +396,7 @@ function menuDialog(title: string): { dialog: HTMLDialogElement; body: HTMLEleme
   const error = document.createElement('p'); error.className = 'form-error'; error.setAttribute('role', 'status');
   dialog.append(heading, body, error);
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
-  document.body.append(dialog); dialog.showModal();
+  document.body.append(dialog); showDialog(dialog);
   return { dialog, body, error };
 }
 
@@ -380,8 +405,8 @@ function openThreadMenu(thread: Thread): void {
   const detail = document.createElement('p'); detail.className = 'field-note thread-detail';
   detail.textContent = [thread.cwd, thread.updatedAt ? new Date(thread.updatedAt * 1000).toLocaleString('zh-CN') : '', thread.waitingTargets?.length ? `正在等待 ${thread.waitingTargets.map(threadTitle).join('、')}` : ''].filter(Boolean).join('\n');
   menu.body.append(detail);
-  const action = (name: string, run: () => Promise<void>) => {
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; button.textContent = name;
+  const action = (name: string, glyph: Icon, run: () => Promise<void>) => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; setAction(button, glyph, name);
     button.disabled = !connected;
     button.addEventListener('click', async () => {
       button.disabled = true; menu.error.textContent = '';
@@ -391,8 +416,8 @@ function openThreadMenu(thread: Thread): void {
     });
     menu.body.append(button);
   };
-  action(thread.pinned ? '取消置顶' : '置顶', () => togglePin(thread.id));
-  const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'quiet'; rename.textContent = '改名'; rename.disabled = !connected;
+  action(thread.pinned ? '取消置顶' : '置顶', 'pin', () => togglePin(thread.id));
+  const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'quiet'; setAction(rename, 'edit', '改名'); rename.disabled = !connected;
   rename.addEventListener('click', () => {
     menu.body.replaceChildren();
     const form = document.createElement('form');
@@ -413,20 +438,20 @@ function openThreadMenu(thread: Thread): void {
     });
   });
   menu.body.append(rename);
-  action(thread.isUnread === false ? '标为未读' : '标为已读', async () => {
+  action(thread.isUnread === false ? '标为未读' : '标为已读', 'unread', async () => {
     const read = thread.isUnread !== false;
     await setRead(thread.id, read);
     if (selected?.id === thread.id) readAttempts.set(thread.id, revision ?? 'history');
     renderInbox();
   });
-  action(archivedList ? '恢复到对话列表' : '归档', async () => {
+  action(archivedList ? '恢复到对话列表' : '归档', 'archive', async () => {
     await client!.request(`/threads/${encodeURIComponent(thread.id)}/archive`, 'POST', { archived: !archivedList });
     await invalidateChats([thread.id]);
     backToInbox();
   });
-  action('改动文件', async () => { openChanges(client!, thread.id, thread.cwd); });
-  if (selected?.id === thread.id) action('在对话中查找', async () => { openChatSearch(); });
-  action('永久删除', async () => { openDeletion(client!, thread, async ids => { await invalidateChats(ids); backToInbox(); }); });
+  action('改动文件', 'file', async () => { openChanges(client!, thread.id, thread.cwd); });
+  if (selected?.id === thread.id) action('在对话中查找', 'search', async () => { openChatSearch(); });
+  action('永久删除', 'trash', async () => { openDeletion(client!, thread, async ids => { await invalidateChats(ids); backToInbox(); }); });
 }
 
 async function invalidateChats(ids: string[]): Promise<void> {
@@ -492,6 +517,13 @@ function markLatestRead(): void {
 
 element('list-menu-button').addEventListener('click', () => {
   const menu = menuDialog('对话列表');
+  const filterLabel = document.createElement('label'); filterLabel.textContent = '筛选项目';
+  const filter = projectFilter.cloneNode(true) as HTMLSelectElement;
+  filter.removeAttribute('id'); filter.hidden = false; filter.value = projectFilter.value;
+  filter.addEventListener('change', () => {
+    projectFilter.value = filter.value; renderInbox(); menu.dialog.close();
+  });
+  filterLabel.append(filter); menu.body.append(filterLabel);
   const legend = document.createElement('h3'); legend.textContent = '分组方式'; menu.body.append(legend);
   for (const [value, name] of [['date', '日期'], ['project', '项目'], ['status', '状态']] as const) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet';
@@ -539,11 +571,18 @@ async function togglePin(id: string): Promise<void> {
 function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
-  const visible = threads.filter(thread => (!query || (thread.title || '').toLocaleLowerCase().includes(query))
-    && (!projectId || (projectId === '__none__' ? !thread.projectId : thread.projectId === projectId)))
-    ;
+  const selectedProject = projects.find(project => project.id === projectId);
+  const visible = threads.filter(thread => {
+    const project = threadProject(thread, projects);
+    const matchesProject = !projectId || (projectId === '__none__'
+      ? !project : Boolean(project && selectedProject && directoryKey(project.path) === directoryKey(selectedProject.path)));
+    const searchText = [threadTitle(thread), project?.name, thread.cwd].join(' ').toLocaleLowerCase();
+    return matchesProject && (!query || searchText.includes(query));
+  });
   const fragment = document.createDocumentFragment();
-  element('list-scope').textContent = `${archivedList ? '已归档 · ' : ''}已加载 ${threads.length} 条${query ? ` · 匹配 ${visible.length} 条` : ''}`;
+  element('list-scope').classList.toggle('sr-only', !query && !projectId && !archivedList);
+  const scope = projectId === '__none__' ? '无项目 · ' : selectedProject ? `${selectedProject.name} · ` : '';
+  element('list-scope').textContent = `${archivedList ? '已归档 · ' : ''}${scope}已加载 ${threads.length} 条${query || projectId ? ` · 匹配 ${visible.length} 条` : ''}`;
   for (const group of groupThreads(visible, projects, grouping)) {
     const heading = document.createElement('h2');
     heading.className = 'thread-group-title'; heading.textContent = group.title;
@@ -676,6 +715,7 @@ async function openChat(id: string, pinned?: boolean): Promise<void> {
   messageInput.value = localStorage.getItem(storageKey('draft', id)) ?? '';
   localStorage.setItem(storageKey('last-chat'), id);
   showView('chat');
+  resizeInput();
   renderChat(true);
   if (selectedPinned === undefined && connected) void togglePin(id);
   try {
@@ -801,15 +841,18 @@ async function showAnnotationSource(annotation: ResponseAnnotation): Promise<voi
   const close = document.createElement('button');
   close.type = 'button';
   close.className = 'quiet';
-  close.textContent = '返回引用';
+  setIcon(close, 'close', '关闭');
   close.addEventListener('click', () => dialog.close());
   const content = document.createElement('div');
   content.className = 'message-content';
   renderMarkdown(content, source.text, source.requestAnnotations ?? [], client, () => {}, selected?.cwd);
-  dialog.append(close, content);
+  const header = document.createElement('div'); header.className = 'dialog-header';
+  const title = document.createElement('h2'); title.textContent = '引用来源';
+  header.append(title, close);
+  dialog.append(header, content);
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
   document.body.append(dialog);
-  dialog.showModal();
+  showDialog(dialog);
   let start = annotation.source!.contentOffsets?.startOffset ?? annotation.source!.startOffset;
   let end = annotation.source!.contentOffsets?.endOffset ?? annotation.source!.endOffset;
   if (!annotation.source!.contentOffsets) {
@@ -844,7 +887,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     const copy = document.createElement('button');
     copy.type = 'button';
     copy.className = 'quiet copy-message';
-    copy.textContent = '复制';
+    setIcon(copy, 'copy', '复制消息');
     copy.addEventListener('click', () => void copyText(node!.dataset.copyText ?? '', copy));
     actions.append(copy);
     const annotations = document.createElement('div');
@@ -854,7 +897,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
       const edit = document.createElement('button');
       edit.type = 'button';
       edit.className = 'quiet edit-message';
-      edit.textContent = '编辑';
+      setIcon(edit, 'edit', '编辑消息');
       edit.addEventListener('click', () => openEdit());
       actions.append(edit);
     }
@@ -1049,12 +1092,13 @@ function renderChat(forceBottom = false): void {
   activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active' && !liveRequests.length);
   sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
     || (!messageInput.value.trim() && !selectedFiles.length && !selectedSkills.length && !selectedThreads.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
-  const queued = runtimeStatus === 'active' && element<HTMLSelectElement>('send-mode').value === 'queue';
-  sendButton.textContent = queued ? '排队' : runtimeStatus === 'active' ? '立即追加' : '发送';
-  element('send-mode-label').hidden = runtimeStatus !== 'active';
-  element('queue-button').textContent = `队列${queueItems.filter(item => !['accepted', 'cancelled'].includes(item.status)).length ? `（${queueItems.filter(item => !['accepted', 'cancelled'].includes(item.status)).length}）` : ''}`;
-  element('queue-button').hidden = runtimeStatus !== 'active' && !queueItems.length;
-  element('queue-button').parentElement!.hidden = element('queue-button').hidden && runtimeStatus !== 'active';
+  const queued = runtimeStatus === 'active' && sendMode === 'queue';
+  setIcon(sendButton, queued ? 'queue' : 'send', queued ? '排队到下一轮' : runtimeStatus === 'active' ? '立即追加' : '发送');
+  element('send-mode-button').hidden = runtimeStatus !== 'active';
+  const queuedCount = queueItems.filter(item => !['accepted', 'cancelled'].includes(item.status)).length;
+  setIcon(element('queue-button'), 'queue', `待发队列（${queuedCount}）`);
+  element('queue-button').dataset.count = queuedCount ? String(queuedCount) : '';
+  element('queue-button').hidden = runtimeStatus !== 'active' && !queuedCount;
   stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
   stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
   stopButton.setAttribute('aria-label', stopOperation ? '正在停止' : '停止任务');
@@ -1063,7 +1107,6 @@ function renderChat(forceBottom = false): void {
   element('resolve-stop').hidden = stopOperation?.status !== 'unknown' || !activeTurnId;
   element('parameters-button').textContent = turnOptions.model ? `${turnOptions.model} · ${turnOptions.thinking}` : [liveModel, liveThinking].filter(Boolean).join(' · ') || '沿用会话参数';
   element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
-  element<HTMLButtonElement>('skills-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
   element<HTMLButtonElement>('files-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
   renderSelectedPin();
   element('open-attachment-chat').hidden = !selectedFiles.length || runtimeStatus !== null;
@@ -1243,11 +1286,37 @@ async function refreshQueue(): Promise<void> {
 }
 
 element('queue-button').addEventListener('click', () => { if (client && selected) openQueue(client, selected.id, selected.cwd, () => void refreshQueue()); });
-element('send-mode').addEventListener('change', () => renderChat());
+element('send-mode-button').addEventListener('click', () => {
+  const menu = menuDialog('发送方式');
+  menu.dialog.classList.add('send-mode-dialog');
+  for (const [value, name, glyph, detail] of [
+    ['immediate', '立即追加', 'send', '将这条消息加入当前正在执行的任务'],
+    ['queue', '排队到下一轮', 'queue', '当前任务结束后发送这条消息'],
+  ] as const) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet';
+    setAction(button, glyph, name);
+    button.setAttribute('aria-pressed', String(sendMode === value));
+    const description = document.createElement('small'); description.textContent = detail;
+    button.querySelector('span')!.append(description);
+    button.addEventListener('click', () => { sendMode = value; renderChat(); menu.dialog.close(); });
+    menu.body.append(button);
+  }
+  const position = () => {
+    const anchor = element('send-mode-button').getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const top = viewport?.offsetTop ?? 0;
+    const safeTop = parseFloat(getComputedStyle(document.body).paddingTop) || 0;
+    menu.dialog.style.top = `${Math.max(top + safeTop + 12, anchor.top - menu.dialog.offsetHeight - 8)}px`;
+    menu.dialog.style.left = `${Math.max(12, anchor.right - menu.dialog.offsetWidth)}px`;
+  };
+  position();
+  window.visualViewport?.addEventListener('resize', position);
+  menu.dialog.addEventListener('close', () => window.visualViewport?.removeEventListener('resize', position), { once: true });
+});
 
 async function sendMessage(): Promise<void> {
   if ((selectedFiles.length && runtimeStatus === null) || (client && selected && uploadCount(client, storageKey('attachments', selected.id)))) return;
-  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles, threadRefs: selectedThreads }, undefined, selectedAnnotations, runtimeStatus === 'active' && element<HTMLSelectElement>('send-mode').value === 'queue');
+  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles, threadRefs: selectedThreads }, undefined, selectedAnnotations, runtimeStatus === 'active' && sendMode === 'queue');
 }
 
 async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
@@ -1314,7 +1383,7 @@ function renderCreation(): void {
   newThinking.disabled = awaitingFirstCatalog || !newModel.value;
   const button = element<HTMLButtonElement>('create-chat-button');
   button.disabled = awaitingFirstCatalog || Boolean(creation) || Boolean(client && uploadCount(client, storageKey('attachments', '__new__')));
-  button.textContent = creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送';
+  setIcon(button, 'send', creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送');
   const catalogStatus = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   element('new-chat-status').textContent = newFormLoading ? catalogStatus
     : creation?.status === 'unknown' ? '请先检查会话列表，确认是否已创建。首条消息已保留。'
@@ -1353,7 +1422,8 @@ async function openNewChat(): Promise<void> {
   const project = projects.find(item => item.id === draft.projectId);
   element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
   renderCreation();
-  newDialog.showModal();
+  showDialog(newDialog);
+  resizeNewInput();
   try {
     const models = await client.loadModels();
     if (request !== dialogRequest || connection?.serverId !== serverId) return;
@@ -1464,25 +1534,49 @@ async function openParameters(draft = turnOptions): Promise<void> {
   element<HTMLButtonElement>('save-options').disabled = !modelChoices.length;
   element('options-catalog-status').hidden = false;
   element('options-catalog-status').textContent = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
-  optionsDialog.showModal();
-  element('approval-policy-label').hidden = true;
+  showDialog(optionsDialog);
+  const permissions = element('permission-mode-fields');
+  permissions.hidden = true;
+  permissions.dataset.original = '';
+  element('permission-modes').replaceChildren();
   element('open-approval-chat').hidden = true;
-  element('approval-policy-status').textContent = '正在读取审批策略…';
-  const policy = element<HTMLSelectElement>('approval-policy');
-  policy.dataset.original = ''; policy.replaceChildren();
-  void optionsClient.request<{ available: boolean; approvalPolicy: unknown; allowed: unknown[] | null }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
+  element('permission-status').textContent = '正在读取权限模式…';
+  void optionsClient.request<{ available: boolean; mode?: string; modes?: { mode: string; enabled: boolean; reason?: string }[] }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
     if (!current()) return;
-    if (!settings.available) { element('approval-policy-status').textContent = '桌面加载该对话后可设置审批策略'; element('open-approval-chat').hidden = false; return; }
-    const original = typeof settings.approvalPolicy === 'string' ? settings.approvalPolicy : '__custom__';
-    const labels: Record<string, string> = { untrusted: '仅信任操作自动执行', 'on-request': '由模型请求审批', never: '不请求审批' };
-    for (const [value, label] of Object.entries(labels)) if (!settings.allowed || settings.allowed.includes(value) || value === original) {
-      const option = new Option(label, value); option.disabled = Boolean(settings.allowed && !settings.allowed.includes(value)); policy.add(option);
+    if (!settings.available) {
+      element('permission-status').textContent = '桌面加载该对话后可读取权限模式';
+      element('open-approval-chat').hidden = false;
+      return;
     }
-    if (original === '__custom__') policy.add(new Option('当前自定义策略', original));
-    policy.value = original; policy.dataset.original = original;
-    element('approval-policy-label').hidden = false;
-    element('approval-policy-status').textContent = '保存后用于后续轮次，当前轮次与已有审批继续按原设置处理。';
-  }).catch(error => { if (current()) element('approval-policy-status').textContent = `审批策略读取失败。${errorText(error)}`; });
+    if (!settings.mode || !settings.modes) {
+      element('permission-status').textContent = '请更新电脑 Reach 服务，以读取完整权限模式。';
+      return;
+    }
+    const labels: Record<string, [string, string]> = {
+      ask: ['请求批准', 'Ask for approval · 访问工作区外文件或网络前，由你审批'],
+      auto: ['自动审批', 'Approve for me · 由自动审批者检查越界请求'],
+      full: ['完全访问', 'Full access · 可访问电脑文件和网络，操作无需审批'],
+      custom: ['当前自定义权限', '沿用电脑上的权限组合'],
+    };
+    const choices = [...settings.modes];
+    if (settings.mode === 'custom') choices.unshift({ mode: 'custom', enabled: false });
+    for (const choice of choices) {
+      const copy = labels[choice.mode];
+      if (!copy) continue;
+      const label = document.createElement('label'); label.className = 'permission-choice';
+      const input = document.createElement('input');
+      input.type = 'radio'; input.name = 'permission-mode'; input.value = choice.mode;
+      input.checked = settings.mode === choice.mode; input.disabled = !choice.enabled;
+      const text = document.createElement('span');
+      const title = document.createElement('strong'); title.textContent = copy[0];
+      const description = document.createElement('small'); description.textContent = choice.reason || copy[1];
+      text.append(title, description); label.append(input, text);
+      element('permission-modes').append(label);
+    }
+    permissions.dataset.original = settings.mode;
+    permissions.hidden = false;
+    element('permission-status').textContent = '保存后用于后续轮次。';
+  }).catch(error => { if (current()) element('permission-status').textContent = `权限模式读取失败。${errorText(error)}`; });
   // Loaded sessions already provide these settings in their live snapshot
   if (!hasLiveSettings) void optionsClient.request<TurnOptions>(`/threads/${encodeURIComponent(id)}/settings`).then(settings => {
     if (!current() || (runtimeStatus !== null && liveModel && liveThinking)) return;
@@ -1577,7 +1671,8 @@ function renderReferences(container: HTMLElement, skills: Skill[], refs: ThreadR
         const view = document.createElement('button'); view.className = 'quiet'; view.textContent = '查看引用对话';
         view.addEventListener('click', () => { dialog.close(); newDialog.close(); void openChat(item.id); });
         const close = document.createElement('button'); close.className = 'quiet'; close.textContent = '关闭'; close.addEventListener('click', () => dialog.close());
-        dialog.append(title, id, view, close); dialog.addEventListener('close', () => dialog.remove(), { once: true }); document.body.append(dialog); dialog.showModal();
+        const header = document.createElement('div'); header.className = 'dialog-header'; header.append(title, close);
+        dialog.append(header, id, view); dialog.addEventListener('close', () => dialog.remove(), { once: true }); document.body.append(dialog); showDialog(dialog);
       }
     });
     const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; button.textContent = '×';
@@ -1650,7 +1745,7 @@ function openEdit(): void {
   element<HTMLTextAreaElement>('edit-prompt').value = localStorage.getItem(storageKey('edit-draft', `${selected.id}:${editableTurn.turnId}`)) ?? editableTurn.prompt;
   showFormError('edit-error', editing.blockedReason);
   element<HTMLButtonElement>('submit-edit').disabled = Boolean(editing.blockedReason);
-  editDialog.showModal();
+  showDialog(editDialog);
 }
 
 function clearInteraction(): void {
@@ -1734,7 +1829,7 @@ element('new-chat-project').addEventListener('change', () => {
 element('new-chat-prompt').addEventListener('input', () => { saveNewChatDraft(); resizeNewInput(); });
 element('new-expand-input').addEventListener('click', () => {
   const button = element('new-expand-input'); const expanded = button.getAttribute('aria-expanded') !== 'true';
-  button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? '收起' : '展开';
+  button.setAttribute('aria-expanded', String(expanded)); setIcon(button, expanded ? 'collapse' : 'expand', expanded ? '收起输入框' : '展开输入框');
   resizeNewInput(); element<HTMLTextAreaElement>('new-chat-prompt').focus({ preventScroll: true });
 });
 function resizeNewInput(): void {
@@ -1768,11 +1863,9 @@ element('open-approval-chat').addEventListener('click', async () => {
   } catch (error) { showFormError('options-error', errorText(error)); }
   finally { button.disabled = false; }
 });
-element('skills-button').addEventListener('click', () => openContext());
-element('new-context-button').addEventListener('click', () => openContext(true));
 bindMention(messageInput, picked => openContext(false, picked));
 bindMention(element<HTMLTextAreaElement>('new-chat-prompt'), picked => openContext(true, picked));
-element('new-parameters-button').addEventListener('click', () => element<HTMLDialogElement>('new-parameters-dialog').showModal());
+element('new-parameters-button').addEventListener('click', () => showDialog(element<HTMLDialogElement>('new-parameters-dialog')));
 element('chat-menu-button').addEventListener('click', () => {
   if (selected) openThreadMenu(threads.find(thread => thread.id === selected!.id) ?? { ...selected, projectId: null, updatedAt: 0, pinned: selectedPinned });
 });
@@ -1793,8 +1886,8 @@ function addFiles(imagesOnly = false): void {
     else if (selected?.id === id) { selectedFiles = draft; renderChat(); }
   }, imagesOnly, key);
 }
-element('files-button').addEventListener('click', () => { addingToNew = false; element<HTMLDialogElement>('add-content-dialog').showModal(); });
-element('new-files-button').addEventListener('click', () => { addingToNew = true; element<HTMLDialogElement>('add-content-dialog').showModal(); });
+element('files-button').addEventListener('click', () => { addingToNew = false; showDialog(element<HTMLDialogElement>('add-content-dialog')); });
+element('new-files-button').addEventListener('click', () => { addingToNew = true; showDialog(element<HTMLDialogElement>('add-content-dialog')); });
 element('add-images').addEventListener('click', () => {
   element<HTMLDialogElement>('add-content-dialog').close();
   addFiles(true);
@@ -1856,15 +1949,22 @@ element('options-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (!selected || selected.id !== optionsChatId) return;
   const id = selected.id;
-  const policy = element<HTMLSelectElement>('approval-policy');
-  if (policy.dataset.original && policy.value !== policy.dataset.original && client) {
+  const request = dialogRequest;
+  const options = selectedParameters(optionsModel, optionsThinking);
+  const current = () => selected?.id === id && dialogRequest === request;
+  const permissions = element('permission-mode-fields');
+  const mode = permissions.querySelector<HTMLInputElement>('input:checked')?.value;
+  if (mode && mode !== permissions.dataset.original && client) {
     const button = element<HTMLButtonElement>('save-options'); button.disabled = true;
-    try { await client.request(`/threads/${encodeURIComponent(id)}/approval`, 'POST', { policy: policy.value }); }
-    catch (error) { showFormError('options-error', errorText(error)); return; }
-    finally { button.disabled = false; }
-    if (selected?.id !== id) return;
+    try {
+      await client.request(`/threads/${encodeURIComponent(id)}/approval`, 'POST', { mode });
+      if (!current()) return;
+      permissions.dataset.original = mode;
+    }
+    catch (error) { if (current()) showFormError('options-error', errorText(error)); return; }
+    finally { if (current()) button.disabled = false; }
   }
-  turnOptions = selectedParameters(optionsModel, optionsThinking);
+  turnOptions = options;
   localStorage.setItem(storageKey('options', selected.id), JSON.stringify(turnOptions));
   optionsDialog.close();
   renderChat();
@@ -1992,7 +2092,7 @@ function openChatSearch(): void {
 element('message-form').addEventListener('submit', event => { event.preventDefault(); void sendMessage(); });
 element('expand-input').addEventListener('click', () => {
   const expanded = element('message-form').classList.toggle('expanded');
-  element('expand-input').textContent = expanded ? '收起' : '展开';
+  setIcon(element('expand-input'), expanded ? 'collapse' : 'expand', expanded ? '收起输入框' : '展开输入框');
   element('expand-input').setAttribute('aria-expanded', String(expanded));
   resizeInput();
   messageInput.focus({ preventScroll: true });

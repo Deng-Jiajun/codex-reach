@@ -1,3 +1,4 @@
+import { showDialog, setIcon } from './ui';
 import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core';
 import { renderMarkdown } from './message-content';
 import type { ReachClient } from './api';
@@ -92,13 +93,20 @@ export async function openReader(address: string, client: ReachClient | null, ro
     result.addEventListener('click', action);
     return result;
   };
-  const expand = button('展开', () => { dialog.classList.toggle('reader-full'); expand.textContent = dialog.classList.contains('reader-full') ? '收起' : '展开'; });
+  const expand = button('展开', () => {
+    const expanded = dialog.classList.toggle('reader-full');
+    setIcon(expand, expanded ? 'collapse' : 'expand', expanded ? '收起阅读面板' : '展开阅读面板');
+  });
+  setIcon(expand, 'expand', '展开阅读面板');
   header.append(button('关闭', () => dialog.close()), title, expand);
   let startY = 0;
   header.addEventListener('touchstart', event => { startY = event.touches[0].clientY; }, { passive: true });
   header.addEventListener('touchend', event => {
     const distance = event.changedTouches[0].clientY - startY;
-    if (Math.abs(distance) > 40) { dialog.classList.toggle('reader-full', distance < 0); expand.textContent = distance < 0 ? '收起' : '展开'; }
+    if (Math.abs(distance) > 40) {
+      dialog.classList.toggle('reader-full', distance < 0);
+      setIcon(expand, distance < 0 ? 'collapse' : 'expand', distance < 0 ? '收起阅读面板' : '展开阅读面板');
+    }
   });
   const status = document.createElement('p');
   status.className = 'field-note'; status.textContent = '正在读取…'; status.setAttribute('role', 'status');
@@ -109,7 +117,7 @@ export async function openReader(address: string, client: ReachClient | null, ro
   const focused = document.activeElement;
   dialog.addEventListener('close', () => { dialog.remove(); if (focused instanceof HTMLElement) focused.focus({ preventScroll: true }); }, { once: true });
   document.body.append(dialog);
-  dialog.showModal();
+  showDialog(dialog);
 
   async function load(): Promise<void> {
     body.replaceChildren(); controls.replaceChildren(); status.textContent = '正在读取…';

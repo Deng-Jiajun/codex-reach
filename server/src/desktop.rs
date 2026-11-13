@@ -399,19 +399,25 @@ impl Ipc {
     }
 
     pub async fn update_approval(&self, id: &str, policy: &str) -> Result<Value> {
+        self.update_permissions(id, json!({"approvalPolicy":policy}))
+            .await?;
+        Ok(json!({"approvalPolicy":policy,"scope":"nextTurn"}))
+    }
+
+    pub async fn update_permissions(&self, id: &str, settings: Value) -> Result<Value> {
         let owner = self.follow(id).await?.context("请先在桌面加载该对话")?;
         let response = self
             .request(
                 "thread-follower-update-thread-settings",
                 json!({
-                    "conversationId":id,"threadSettings":{"approvalPolicy":policy}
+                    "conversationId":id,"threadSettings":settings
                 }),
                 Some(&owner),
                 2,
             )
             .await?;
-        ensure!(response["result"]["applied"] == true, "审批策略未应用");
-        Ok(json!({"approvalPolicy":policy,"scope":"nextTurn"}))
+        ensure!(response["result"]["applied"] == true, "权限设置未应用");
+        Ok(json!({"scope":"nextTurn"}))
     }
 
     pub async fn interrupt(&self, id: &str, expected_turn_id: &str) -> Result<Value> {

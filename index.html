@@ -43,18 +43,18 @@
         <div class="inbox-heading">
           <h1>对话</h1>
           <div class="refresh-controls">
+            <button id="search-button" class="quiet icon-button" type="button" aria-label="搜索对话和项目" aria-expanded="false"></button>
             <button id="list-menu-button" class="quiet icon-button" type="button" aria-label="对话列表菜单">⋯</button>
             <button id="new-chat-button" class="quiet icon-button" type="button" aria-label="新建对话"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
             <span id="refresh-status" class="sr-only" role="status" aria-live="polite"></span>
             <button id="refresh-button" class="quiet icon-button" type="button" aria-label="刷新"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8.3 8.3 0 0 1 20 12M4 12a8.3 8.3 0 0 0 13.9 5.9"/></svg></button>
           </div>
         </div>
-        <div class="filters">
-          <label class="sr-only" for="project-filter">项目</label>
-          <select id="project-filter"><option value="">全部项目</option></select>
+        <div id="list-search" class="filters" hidden>
           <label class="sr-only" for="thread-search">搜索已加载的对话</label>
-          <input id="thread-search" type="search" placeholder="搜索已加载标题" />
+          <input id="thread-search" type="search" placeholder="搜索已加载的对话或项目" />
         </div>
+        <select id="project-filter" hidden aria-label="项目"><option value="">全部项目</option></select>
         <p id="list-scope" class="field-note"></p>
         <div id="thread-list" class="thread-list"></div>
         <button id="more-threads" class="quiet more" type="button" hidden>加载更多对话</button>
@@ -77,6 +77,7 @@
           <button id="retry-history" class="quiet" type="button">重试</button>
         </div>
         <p id="history-status" class="loading-status" role="status" hidden><span class="spinner" aria-hidden="true"></span><span id="history-status-text"></span></p>
+        <div class="reading-area">
         <div id="messages-scroll" class="messages-scroll">
           <button id="older-button" class="quiet more" type="button" hidden><span id="older-spinner" class="spinner" aria-hidden="true" hidden></span><span id="older-label">读取更早的消息</span></button>
           <p id="empty-history" class="empty" hidden>暂无消息</p>
@@ -85,9 +86,8 @@
           <p id="activity" class="activity" role="status" hidden></p>
         </div>
         <div id="reading-actions" class="reading-actions" hidden><button id="jump-latest" class="quiet" type="button">回到最新 ↓</button><button id="jump-requests" class="quiet" type="button" hidden>查看待处理</button></div>
+        </div>
         <div class="composer-area">
-          <div class="queue-controls"><label id="send-mode-label" hidden><span class="sr-only">运行中发送方式</span><select id="send-mode"><option value="immediate">立即追加</option><option value="queue">排队到下一轮</option></select></label><button id="queue-button" type="button" class="quiet">队列</button></div>
-          <div class="composer-tools"><button id="files-button" class="quiet" type="button" aria-label="添加内容">＋</button><button id="parameters-button" class="quiet" type="button">沿用会话参数</button><button id="skills-button" class="quiet" type="button">@</button><button id="expand-input" class="quiet" type="button" aria-expanded="false">展开</button></div>
           <div id="selected-skills" class="selected-skills" hidden></div>
           <button id="manage-files" class="quiet" type="button" hidden>附件</button>
           <div id="selected-files" hidden></div>
@@ -100,10 +100,19 @@
             <button id="resolve-delivery" class="quiet" type="button" hidden>已核对，恢复编辑</button>
           </div>
           <form id="message-form" class="composer">
+            <div class="composer-input">
             <label class="sr-only" for="message-input">消息</label>
-            <textarea id="message-input" rows="2" placeholder="发送消息" spellcheck="false"></textarea>
+            <textarea id="message-input" rows="1" placeholder="发送消息，@ 引用" spellcheck="false"></textarea>
+            <button id="expand-input" class="quiet" type="button" aria-expanded="false" aria-label="展开输入框"></button>
+            </div>
+            <div class="composer-tools">
+            <button id="files-button" class="quiet" type="button" aria-label="添加内容"></button>
+            <button id="parameters-button" class="quiet" type="button">沿用会话参数</button>
+            <button id="queue-button" type="button" class="quiet" aria-label="待发队列" hidden></button>
             <button id="stop-button" class="quiet icon-button stop" type="button" aria-label="停止任务" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg></button>
+            <button id="send-mode-button" class="quiet" type="button" aria-label="选择发送方式" aria-haspopup="dialog" hidden></button>
             <button id="send-button" class="send" type="submit">发送</button>
+            </div>
           </form>
         </div>
       </main>
@@ -118,14 +127,22 @@
           <fieldset id="new-chat-fields">
             <label>项目<select id="new-chat-project"></select></label>
             <p id="new-chat-path" class="field-note"></p>
-            <div class="composer-tools"><button id="new-files-button" class="quiet" type="button" aria-label="添加内容">＋</button><button id="new-parameters-button" class="quiet" type="button">使用默认设置</button><button id="new-context-button" class="quiet" type="button">@</button><button id="new-expand-input" class="quiet" type="button" aria-expanded="false">展开</button></div>
             <div id="new-references" class="selected-skills" hidden></div>
             <button id="new-manage-files" class="quiet" type="button" hidden>附件</button><div id="new-selected-files" class="attachment-list composer-attachments"></div>
-            <label class="sr-only" for="new-chat-prompt">首条消息</label><textarea id="new-chat-prompt" rows="3" placeholder="输入要执行的任务"></textarea>
+            <div class="composer">
+              <div class="composer-input">
+                <label class="sr-only" for="new-chat-prompt">首条消息</label><textarea id="new-chat-prompt" rows="2" placeholder="输入任务，@ 引用"></textarea>
+                <button id="new-expand-input" class="quiet" type="button" aria-expanded="false" aria-label="展开输入框"></button>
+              </div>
+              <div class="composer-tools">
+                <button id="new-files-button" class="quiet" type="button" aria-label="添加内容"></button>
+                <button id="new-parameters-button" class="quiet" type="button">使用默认设置</button>
+                <button id="create-chat-button" class="send" type="submit" aria-label="创建并发送"></button>
+              </div>
+            </div>
           </fieldset>
           <p id="new-chat-status" class="field-note" role="status" hidden></p>
           <p id="new-chat-error" class="form-error" role="alert" hidden></p>
-          <button id="create-chat-button" class="primary" type="submit">创建并发送</button>
           <button id="resolve-create" class="quiet" type="button" hidden>已核对会话列表，恢复编辑</button>
         </form>
       </dialog>
@@ -137,7 +154,9 @@
           <p id="options-catalog-status" class="field-note" role="status" hidden></p>
           <div class="field-pair"><label>模型<select id="options-model"></select></label><label>思考深度<select id="options-thinking"></select></label></div>
           <p class="field-note">所选参数用于下一轮。执行中追加沿用当前轮次的参数。</p>
-          <label id="approval-policy-label" hidden>下一轮审批策略<select id="approval-policy"></select></label><p id="approval-policy-status" class="field-note" role="status"></p><button id="open-approval-chat" class="quiet" type="button" hidden>载入桌面对话以设置审批策略</button>
+          <fieldset id="permission-mode-fields" hidden><legend>权限模式</legend><div id="permission-modes"></div></fieldset>
+          <p id="permission-status" class="field-note" role="status"></p>
+          <button id="open-approval-chat" class="quiet" type="button" hidden>载入桌面对话以读取权限模式</button>
           <p id="options-error" class="form-error" role="alert" hidden></p>
           <button id="save-options" class="primary" type="submit">保存</button>
         </form>

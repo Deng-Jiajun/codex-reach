@@ -211,7 +211,7 @@ public class InteractionFlowTest {
         await(webView, "document.querySelector('#delivery-note').hidden && document.querySelectorAll('.async-questions .request-answer').length===2");
         assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的普通草稿' && !document.querySelector('#messages').textContent.includes('<send_user_message_question_reply>')"));
 
-        evaluate(webView, "document.querySelector('#skills-button').click(); null");
+        evaluate(webView, "var input=document.querySelector('#message-input'); input.value+=' @'; input.setSelectionRange(input.value.length,input.value.length); input.dispatchEvent(new InputEvent('input',{data:'@',bubbles:true})); null");
         await(webView, "document.querySelector('.context-picker')?.open && document.querySelectorAll('.context-result').length===2");
         evaluate(webView, "document.querySelector('.context-picker input').value='精确协议'; document.querySelector('.context-picker input').dispatchEvent(new Event('input',{bubbles:true})); null");
         await(webView, "document.querySelectorAll('.context-result').length===1 && document.querySelector('.context-results').textContent.includes('interaction-check')");

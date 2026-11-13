@@ -1,3 +1,4 @@
+import { showDialog } from './ui';
 import type { ReachClient } from './api';
 import type { FileAttachment } from './files';
 import type { Skill, Thread, ThreadReference } from './types';
@@ -83,7 +84,7 @@ export function openContextPicker(client: ReachClient, scope: { chatId?: string;
   });
   more.addEventListener('click', () => void load(true));
   dialog.addEventListener('close', () => { request++; clearTimeout(timer); dialog.remove(); }, { once: true });
-  document.body.append(dialog); dialog.showModal(); void load();
+  document.body.append(dialog); showDialog(dialog); void load();
 }
 
 export function bindMention(input: HTMLTextAreaElement, open: (picked: () => void) => void): void {

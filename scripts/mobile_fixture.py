@@ -90,7 +90,11 @@ def get(handler, url, organization, files, png):
     elif path.endswith("/state"):
         handler.reply({"available": False})
     elif path.endswith("/approval"):
-        handler.reply({"available": True, "approvalPolicy": "never", "allowed": ["never", "on-request", "untrusted"]})
+        handler.reply({
+            "available": True, "approvalPolicy": "never",
+            "allowed": ["never", "on-request", "untrusted"], "mode": "full",
+            "modes": [{"mode": mode, "enabled": True} for mode in ["ask", "auto", "full"]],
+        })
     elif path == "/api/events":
         event_reads += 1
         after = int(parse_qs(url.query).get("after", ["-1"])[0])

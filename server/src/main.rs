@@ -6,6 +6,7 @@ mod files;
 mod model;
 mod organization;
 mod outbox;
+mod permissions;
 mod queue;
 mod reader;
 mod uploads;
@@ -325,15 +326,34 @@ async fn approval_settings(
         .app_server
         .call("configRequirements/read", json!({}))
         .await?;
+    let config = permission_config(&state, &id).await?;
     Ok(Json(
         json!({"available":view["available"] == true && !view["approvalPolicy"].is_null(),
-        "approvalPolicy":view["approvalPolicy"],"allowed":requirements["requirements"]["allowedApprovalPolicies"]}),
+        "approvalPolicy":view["approvalPolicy"],"allowed":requirements["requirements"]["allowedApprovalPolicies"],
+        "mode":permissions::current(&view["permissionSettings"]),
+        "modes":permissions::choices(&requirements["requirements"], &config)}),
     ))
+}
+
+async fn permission_config(state: &AppState, id: &str) -> Result<Value, ApiError> {
+    let thread = state
+        .app_server
+        .call("thread/read", json!({"threadId":id,"includeTurns":false}))
+        .await?;
+    let response = state
+        .app_server
+        .call(
+            "config/read",
+            json!({"includeLayers":false,"cwd":thread["thread"]["cwd"]}),
+        )
+        .await?;
+    Ok(response["config"].clone())
 }
 
 #[derive(Deserialize)]
 struct ApprovalPolicyRequest {
-    policy: String,
+    policy: Option<String>,
+    mode: Option<String>,
 }
 
 async fn set_approval(
@@ -341,15 +361,38 @@ async fn set_approval(
     Path(id): Path<String>,
     Json(input): Json<ApprovalPolicyRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    if !matches!(input.policy.as_str(), "untrusted" | "on-request" | "never") {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "审批策略无效".to_owned()));
-    }
     let requirements = state
         .app_server
         .call("configRequirements/read", json!({}))
         .await?;
+    if let Some(id_mode) = input.mode {
+        if input.policy.is_some() {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "权限模式与单独审批策略不能同时提交".to_owned(),
+            ));
+        }
+        let mode = permissions::MODES
+            .iter()
+            .find(|mode| mode.id == id_mode)
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "权限模式无效".to_owned()))?;
+        let config = permission_config(&state, &id).await?;
+        if let Some(reason) = mode.unavailable_reason(&requirements["requirements"], &config) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, reason.to_owned()));
+        }
+        state
+            .ipc()
+            .await?
+            .update_permissions(&id, mode.settings())
+            .await?;
+        return Ok(Json(json!({"mode":mode.id,"scope":"nextTurn"})));
+    }
+    let policy = input
+        .policy
+        .filter(|policy| matches!(policy.as_str(), "untrusted" | "on-request" | "never"))
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "审批策略无效".to_owned()))?;
     if let Some(allowed) = requirements["requirements"]["allowedApprovalPolicies"].as_array() {
-        if !allowed.iter().any(|value| value == &input.policy) {
+        if !allowed.iter().any(|value| value == &policy) {
             return Err(ApiError(
                 StatusCode::BAD_REQUEST,
                 "当前配置不允许选择该审批策略".to_owned(),
@@ -357,11 +400,7 @@ async fn set_approval(
         }
     }
     Ok(Json(
-        state
-            .ipc()
-            .await?
-            .update_approval(&id, &input.policy)
-            .await?,
+        state.ipc().await?.update_approval(&id, &policy).await?,
     ))
 }
 

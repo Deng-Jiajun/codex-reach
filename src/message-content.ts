@@ -4,6 +4,7 @@ import type { ResponseAnnotation } from './types';
 import type { ReachClient } from './api';
 import { loadImage, openPreview } from './files';
 import { openReader } from './reader';
+import { setIcon } from './ui';
 
 // Source offsets use rendered UTF-16 text, excluding controls injected by Reach
 export function sourceText(node: Node, native = true): string {
@@ -52,7 +53,9 @@ export function rangeOffsets(content: HTMLElement, range: Range, native = true):
 }
 
 export async function copyText(text: string, button: HTMLButtonElement): Promise<void> {
-  const label = button.textContent;
+  button.disabled = true;
+  const content = button.innerHTML;
+  const label = button.getAttribute('aria-label') ?? button.textContent ?? '';
   try {
     if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
     else {
@@ -65,9 +68,17 @@ export async function copyText(text: string, button: HTMLButtonElement): Promise
       input.remove();
       if (!copied) throw new Error('复制失败');
     }
-    button.textContent = '已复制';
-  } catch { button.textContent = '复制失败'; }
-  setTimeout(() => { button.textContent = label; }, 1600);
+    setIcon(button, 'check', '已复制');
+  } catch { setIcon(button, 'close', '复制失败，请重试'); }
+  const status = document.createElement('span');
+  status.className = 'sr-only'; status.setAttribute('role', 'status');
+  status.textContent = button.getAttribute('aria-label');
+  button.after(status);
+  setTimeout(() => {
+    button.innerHTML = content; button.setAttribute('aria-label', label); button.title = label;
+    button.disabled = false;
+    status.remove();
+  }, 1600);
 }
 
 export function renderMarkdown(container: HTMLElement, body: string, annotations: ResponseAnnotation[],
@@ -181,7 +192,7 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
     copy.type = 'button';
     copy.className = 'quiet copy-code';
     copy.dataset.selectionIgnore = '';
-    copy.textContent = '复制代码';
+    setIcon(copy, 'copy', '复制代码');
     const code = pre.textContent ?? '';
     copy.addEventListener('click', () => void copyText(code, copy));
     pre.after(copy);

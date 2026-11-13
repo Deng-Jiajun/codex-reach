@@ -1,3 +1,4 @@
+import { showDialog } from './ui';
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
 import type { ReachClient } from './api';
 
@@ -92,5 +93,5 @@ export function openNotificationSettings(client: ReachClient): void {
     finally { save.disabled = false; }
   });
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
-  document.body.append(dialog); dialog.showModal();
+  document.body.append(dialog); showDialog(dialog);
 }
