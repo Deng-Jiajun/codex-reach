@@ -5,6 +5,7 @@ import copy
 import json
 import threading
 import time
+import mobile_fixture
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -163,7 +164,7 @@ def initial_organization_state():
                 {"id": "organization-reasoning-2", "kind": "reasoning", "text": "确认配置字段与运行状态。", "phase": None},
                 {"id": "organization-command", "kind": "tool", "text": "rg -n pattern example.cpp\n找到对应处理分支", "phase": None},
                 {"id": "organization-command-2", "kind": "tool", "text": "查看相关函数实现", "phase": None},
-                {"id": "organization-answer", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n第二行可引用", "phase": "final_answer"},
+                {"id": "organization-answer", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n第二行可引用\n\n[HTML 阅读](C:/Example/mobile.html)\n[PDF 阅读](C:/Example/mobile.pdf)", "phase": "final_answer"},
             ]}],
         }},
     }
@@ -282,6 +283,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         url = urlparse(self.path)
+        if (url.path.startswith("/reader/") or url.path.startswith("/control/mobile")) and mobile_fixture.get(self, url, organization_state, organization_files, organization_png):
+            return
         if url.path == "/control/stats":
             with condition:
                 self.reply({"sends": len(state["requests"]), **{
@@ -303,6 +306,8 @@ class Handler(BaseHTTPRequestHandler):
                 ]})
             return
         if not self.authorized():
+            return
+        if mobile_fixture.get(self, url, organization_state, organization_files, organization_png):
             return
         if url.path == '/api/threads':
             time.sleep(1)
@@ -434,6 +439,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
+        if mobile_fixture.post(self, organization_state, organization_files, organization_png):
+            return
         if self.path in ("/control/organization-reset", "/control/release-organization-message"):
             with condition:
                 if self.path == "/control/organization-reset":

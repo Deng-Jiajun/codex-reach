@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Reach 移动交互"
+  short_description: "审查和设计 Codex Reach 手机端的布局、手势、输入与阅读流程"
+  default_prompt: "使用 $codex-reach-mobile-ux，结合当前产品规格和手机截图改进本次涉及的交互流程。"

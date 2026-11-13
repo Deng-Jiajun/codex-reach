@@ -49,9 +49,32 @@ impl AppServerClient {
             )
             .await?;
         let thread = &metadata["thread"];
+        let mut turns = model::history_turns(&page);
+        for turn in turns.iter_mut().filter(|turn| {
+            turn.messages.iter().any(|message| {
+                message.kind == "assistant" && message.text.contains(":codex-annotation")
+            })
+        }) {
+            let opening = self
+                .call(
+                    "thread/items/list",
+                    json!({"threadId":thread_id,"turnId":turn.id,"limit":2,"sortDirection":"asc"}),
+                )
+                .await?;
+            let input = opening["data"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|entry| &entry["item"])
+                .find(|item| item["type"] != "contextCompaction")
+                .filter(|item| item["type"] == "userMessage")
+                .map(|item| item["content"].clone())
+                .unwrap_or(Value::Null);
+            model::associate_annotations(turn, model::annotations_from_input(&input));
+        }
         Ok(json!({
             "id":thread_id,"title":model::text(thread,"name"),"cwd":thread["cwd"],
-            "status":model::status(&thread["status"]),"turns":model::history_turns(&page),
+            "status":model::status(&thread["status"]),"turns":turns,
             "nextCursor":page["nextCursor"],"hasMore":page["nextCursor"].is_string()
         }))
     }

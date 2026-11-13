@@ -82,7 +82,7 @@ assert type(stats["responses"][1]["approvalRequestId"]) is str
 assert len(stats["messageRequests"]) == 3
 assert len(stats["editRequests"]) == 1
 assert stats["postCounts"] == {"respond": 7, "messages": 3, "edit": 1}
-assert stats["openCount"] == 1
+assert stats["openCount"] == 0
 PY
 
 adb logcat -d -s CodexReachVerification:I '*:S' > artifacts/sqlite-results.txt

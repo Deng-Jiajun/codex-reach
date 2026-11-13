@@ -13,6 +13,14 @@ pub struct TurnOptions {
     pub skills: Vec<SkillSelection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<FileAttachment>,
+    #[serde(default, rename = "threadRefs", skip_serializing_if = "Vec::is_empty")]
+    pub thread_refs: Vec<ThreadReference>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ThreadReference {
+    pub id: String,
+    pub title: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -34,6 +42,8 @@ pub struct Message {
     pub question_replies: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub response_annotations: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_annotations: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
 }
@@ -85,9 +95,37 @@ fn output_text(value: &Value) -> String {
         .to_owned()
 }
 
-fn message(item: &Value) -> Option<Message> {
+pub(crate) fn message(item: &Value) -> Option<Message> {
     let kind = item["type"].as_str()?;
     let mut image_attachments = Vec::new();
+    let outputs = if kind == "dynamicToolCall" {
+        &item["contentItems"]
+    } else {
+        &item["output"]
+    };
+    for content in outputs.as_array().into_iter().flatten() {
+        let source = match content["type"].as_str() {
+            Some("input_image") => content["image_url"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    content["file_id"]
+                        .as_str()
+                        .map(|id| format!("sediment://{id}"))
+                }),
+            Some("inputImage") => content["imageUrl"].as_str().map(str::to_owned),
+            _ => None,
+        };
+        if let Some(url) = source {
+            image_attachments.push(MessageAttachment {
+                name: "工具图片".to_owned(),
+                path: None,
+                url: Some(url),
+                directory: false,
+                image: true,
+            });
+        }
+    }
     let (role, body) = match kind {
         "userMessage" | "steeringUserMessage" => {
             let parts = item
@@ -130,6 +168,71 @@ fn message(item: &Value) -> Option<Message> {
             ("user", texts.join("\n"))
         }
         "agentMessage" => ("assistant", text(item, "text")),
+        "imageGeneration" => {
+            let path = item["savedPath"].as_str().filter(|value| !value.is_empty());
+            let source = item["src"]
+                .as_str()
+                .or_else(|| item["result"].as_str())
+                .filter(|value| !value.is_empty());
+            let (path, url) = if let Some(path) = path {
+                (Some(path.to_owned()), None)
+            } else if let Some(id) = item["fileId"].as_str() {
+                (None, Some(format!("sediment://{id}")))
+            } else if let Some(source) = source {
+                if source.starts_with("data:")
+                    || source.starts_with("http:")
+                    || source.starts_with("https:")
+                    || source.starts_with("sediment:")
+                {
+                    (None, Some(source.to_owned()))
+                } else if source.starts_with('/')
+                    || source.starts_with("file:")
+                    || source.as_bytes().get(1) == Some(&b':')
+                {
+                    let source = source.strip_prefix("file://").unwrap_or(source);
+                    let source = if source.as_bytes().get(2) == Some(&b':') {
+                        source.trim_start_matches('/')
+                    } else {
+                        source
+                    };
+                    (Some(source.to_owned()), None)
+                } else {
+                    (None, Some(format!("data:image/png;base64,{source}")))
+                }
+            } else {
+                (None, None)
+            };
+            if path.is_some() || url.is_some() {
+                image_attachments.push(MessageAttachment {
+                    name: "生成图片".to_owned(),
+                    path,
+                    url,
+                    directory: false,
+                    image: true,
+                });
+            }
+            (
+                "tool",
+                if item["status"] == "completed" {
+                    "生成图片"
+                } else {
+                    "正在生成图片"
+                }
+                .to_owned(),
+            )
+        }
+        "imageView" => {
+            if let Some(path) = item["path"].as_str() {
+                image_attachments.push(MessageAttachment {
+                    name: path.rsplit(['/', '\\']).next().unwrap_or("图片").to_owned(),
+                    path: Some(path.to_owned()),
+                    url: None,
+                    directory: false,
+                    image: true,
+                });
+            }
+            ("tool", "查看图片".to_owned())
+        }
         "reasoning" => {
             let body = item["summary"]
                 .as_array()?
@@ -185,6 +288,7 @@ fn message(item: &Value) -> Option<Message> {
             ),
         ),
         "fileChange" => ("tool", "文件变更".to_owned()),
+        "functionCallOutput" if !image_attachments.is_empty() => ("tool", String::new()),
         _ => return None,
     };
     let annotations = (role == "user")
@@ -240,6 +344,7 @@ fn message(item: &Value) -> Option<Message> {
         questions,
         question_replies,
         response_annotations,
+        request_annotations: None,
         attachments,
     })
 }
@@ -254,12 +359,19 @@ fn response_annotations(text: &str) -> Option<(String, Vec<Value>)> {
     let context = text.split_once("# Response annotations:\n")?.1;
     let (_, encoded) = context.split_once("\n<response-annotations>\n")?;
     let (encoded, request) = encoded.split_once("\n</response-annotations>\n")?;
-    let annotations: Vec<Value> = serde_json::from_str(encoded).ok()?;
-    if annotations
-        .iter()
-        .any(|item| item["text"].as_str().is_none() || item["annotation"].as_str().is_none())
-    {
+    let mut annotations: Vec<Value> = serde_json::from_str(encoded).ok()?;
+    if annotations.iter().any(|item| {
+        item["text"].as_str().is_none()
+            || item
+                .get("annotation")
+                .is_some_and(|value| !value.is_string())
+    }) {
         return None;
+    }
+    for item in &mut annotations {
+        if item.get("annotation").is_none() {
+            item["annotation"] = json!("");
+        }
     }
     let request = request
         .trim_start()
@@ -552,7 +664,18 @@ pub fn pending_requests(state: &Value) -> Vec<Value> {
 }
 
 pub fn turn(value: &Value) -> Turn {
-    Turn {
+    let opening = value["params"].get("input").cloned().or_else(|| {
+        value["items"]
+            .as_array()?
+            .iter()
+            .find(|item| item["type"] != "contextCompaction")?
+            .as_object()
+            .filter(|item| item.get("type").is_some_and(|kind| kind == "userMessage"))?
+            .get("content")
+            .cloned()
+    });
+    let annotations = opening.as_ref().map(|input| annotations_from_input(input));
+    let mut turn = Turn {
         id: value["turnId"]
             .as_str()
             .or_else(|| value["id"].as_str())
@@ -565,6 +688,24 @@ pub fn turn(value: &Value) -> Turn {
             .flatten()
             .filter_map(message)
             .collect(),
+    };
+    if let Some(annotations) = annotations {
+        associate_annotations(&mut turn, annotations);
+    }
+    turn
+}
+
+pub fn annotations_from_input(input: &Value) -> Vec<Value> {
+    message(&json!({"id":"opening","type":"userMessage","content":input}))
+        .map(|message| message.response_annotations)
+        .unwrap_or_default()
+}
+
+pub fn associate_annotations(turn: &mut Turn, annotations: Vec<Value>) {
+    for message in &mut turn.messages {
+        if message.kind == "assistant" {
+            message.request_annotations = Some(annotations.clone());
+        }
     }
 }
 
@@ -597,6 +738,24 @@ pub fn stream_view(state: &Value) -> Value {
         .rev()
         .find(|turn| turn.status == "inProgress")
         .map(|turn| turn.id.clone());
+    let waiting_targets = raw_turns(state)
+        .iter()
+        .filter(|turn| turn["status"] == "inProgress")
+        .flat_map(|turn| turn["items"].as_array().into_iter().flatten())
+        .filter(|item| {
+            item["type"] == "collabAgentToolCall"
+                && item["tool"] == "wait"
+                && item["status"] == "inProgress"
+        })
+        .flat_map(|item| item["receiverThreadIds"].as_array().into_iter().flatten())
+        .cloned()
+        .collect::<Vec<_>>();
+    let waiting_for_user = !requests.is_empty()
+        || state["threadRuntimeStatus"]["activeFlags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|flag| flag == "waitingOnApproval" || flag == "waitingOnUserInput");
     let complete = history["isComplete"].as_bool().unwrap_or(false);
     let recent = turns.len().saturating_sub(10);
     turns.drain(..recent);
@@ -617,8 +776,11 @@ pub fn stream_view(state: &Value) -> Value {
         "model": state["latestCollaborationMode"]["settings"]["model"]
             .as_str().map(Value::from).unwrap_or_else(|| state["latestModel"].clone()),
         "thinking": state["latestReasoningEffort"],
+        "approvalPolicy":state["latestThreadSettings"]["approvalPolicy"],
         "title": state["title"],
         "waiting": !requests.is_empty(),
+        "waitingForUser":waiting_for_user,
+        "waitingTargets":waiting_targets,
         "requests":requests,
         "editableTurn":editable_turn(state)
     })
@@ -627,6 +789,50 @@ pub fn stream_view(state: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annotations_belong_to_opening_request_and_accept_no_comment() {
+        let original = "# Response annotations:\n\n<response-annotations>\n[{\"text\":\"original\",\"source\":{\"messageId\":\"source\",\"startOffset\":1,\"endOffset\":9,\"contentOffsets\":{\"startOffset\":1,\"endOffset\":9}}}]\n</response-annotations>\n\n## My request:\nquestion";
+        let input = json!([{"type":"text","text":original}]);
+        let rendered = turn(&json!({"id":"turn","params":{"input":input},"items":[
+            {"id":"steer","type":"steeringUserMessage","content":[{"type":"text","text":"later message"}]},
+            {"id":"answer","type":"agentMessage","text":":codex-annotation{index=\"1\"}"}
+        ]}));
+        let annotations = rendered
+            .messages
+            .last()
+            .unwrap()
+            .request_annotations
+            .as_ref()
+            .unwrap();
+        assert_eq!(annotations[0]["text"], "original");
+        assert_eq!(annotations[0]["annotation"], "");
+        assert_eq!(annotations[0]["source"]["contentOffsets"]["endOffset"], 9);
+    }
+
+    #[test]
+    fn native_generated_images_preserve_local_and_inline_sources() {
+        let local = message(&json!({"type":"imageGeneration","id":"local","status":"completed","savedPath":"D:/image.png","fileId":"remote"})).unwrap();
+        assert_eq!(local.attachments[0].path.as_deref(), Some("D:/image.png"));
+        assert!(local.attachments[0].url.is_none());
+        let inline = message(&json!({"type":"imageGeneration","id":"inline","status":"completed","result":"aW1hZ2U="})).unwrap();
+        assert_eq!(
+            inline.attachments[0].url.as_deref(),
+            Some("data:image/png;base64,aW1hZ2U=")
+        );
+        let live = message(&json!({"type":"imageGeneration","id":"live","status":"completed","src":"/D:/image.png"})).unwrap();
+        assert_eq!(live.attachments[0].path.as_deref(), Some("D:/image.png"));
+        let function = message(&json!({"type":"functionCallOutput","id":"image-output","output":[{"type":"input_image","image_url":"data:image/png;base64,aW1hZ2U="}]})).unwrap();
+        assert_eq!(
+            function.attachments[0].url.as_deref(),
+            Some("data:image/png;base64,aW1hZ2U=")
+        );
+        let dynamic = message(&json!({"type":"dynamicToolCall","id":"dynamic","contentItems":[{"type":"inputImage","imageUrl":"https://example.invalid/image.png"}]})).unwrap();
+        assert_eq!(
+            dynamic.attachments[0].url.as_deref(),
+            Some("https://example.invalid/image.png")
+        );
+    }
 
     #[test]
     fn response_annotations_preserve_source_and_keep_request_and_files_separate() {

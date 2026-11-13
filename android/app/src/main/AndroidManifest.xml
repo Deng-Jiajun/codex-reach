@@ -4,6 +4,7 @@
     <application
         android:usesCleartextTraffic="true"
         android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -25,6 +26,10 @@
 
         </activity>
 
+        <activity android:name=".ReaderActivity" android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|uiMode|smallestScreenSize|density|fontScale"
+            android:theme="@style/ReachReaderTheme" />
+        <service android:name=".NotificationService" android:exported="false" android:foregroundServiceType="remoteMessaging" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -39,4 +44,7 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
 </manifest>

@@ -84,22 +84,23 @@ public class OrganizationFlowTest {
     }
 
     private void verifyPin(WebView webView) throws Exception {
-        String pin = "document.querySelector('#chat-pin-button')";
-        assertEquals("true", evaluate(webView, pin + ".getAttribute('aria-pressed')==='false'"));
-        evaluate(webView, pin + ".click(); " + pin + ".click(); null");
-        await(webView, "!" + pin + ".disabled && " + pin + ".getAttribute('aria-pressed')==='true'");
+        assertEquals("true", evaluate(webView, "document.querySelector('#chat-pinned').hidden"));
+        evaluate(webView, "document.querySelector('#chat-menu-button').click(); null");
+        clickNamedButton(webView, "document.querySelector('.menu-actions')", "置顶");
+        await(webView, "!document.querySelector('#chat-pinned').hidden && !document.querySelector('.menu-dialog')");
         evaluate(webView, "document.querySelector('#back-button').click(); null");
-        String listPin = "document.querySelector('[data-pin-id=\"fixture-organization\"]')";
-        await(webView, "!document.querySelector('#refresh-button').disabled && " + listPin + ".getAttribute('aria-pressed')==='true'");
-        evaluate(webView, listPin + ".click(); null");
-        await(webView, "!" + listPin + ".disabled && " + listPin + ".getAttribute('aria-pressed')==='false'");
+        await(webView, "!document.querySelector('#refresh-button').disabled && Boolean(document.querySelector('[data-thread-id=fixture-organization] .static-pin'))");
+        pressElement(webView, "[data-thread-id=fixture-organization]", true);
+        await(webView, "Boolean(document.querySelector('.menu-dialog'))");
+        clickNamedButton(webView, "document.querySelector('.menu-actions')", "取消置顶");
+        await(webView, "!document.querySelector('.menu-dialog') && !document.querySelector('[data-thread-id=fixture-organization] .static-pin')");
         assertEquals("false", evaluate(webView, "document.querySelector('#inbox-view').hidden"));
         JSONArray pins = stats().getJSONArray("pinRequests");
         assertEquals(2, pins.length());
         assertTrue(pins.getJSONObject(0).getBoolean("pinned"));
         assertEquals(false, pins.getJSONObject(1).getBoolean("pinned"));
         openThread(webView, SOURCE_ID, "组织与附件验证");
-        assertEquals("true", evaluate(webView, pin + ".getAttribute('aria-pressed')==='false'"));
+        assertEquals("true", evaluate(webView, "document.querySelector('#chat-pinned').hidden"));
         assertEquals("true", evaluate(webView, "!document.querySelector('#chat-actions-button') && !document.body.textContent.includes('创建完整历史分支')"));
     }
 
@@ -155,17 +156,29 @@ public class OrganizationFlowTest {
 
         openPicker(webView);
         // This synthesizes a FileList. The Android system file picker needs separate device acceptance.
-        evaluate(webView, "(()=>{const bytes=Uint8Array.from(atob(" + JSONObject.quote(SYNTHETIC_PNG) + "),char=>char.charCodeAt(0)); const selection=new DataTransfer(); selection.items.add(new File([bytes],'mobile.png',{type:'image/png'})); selection.items.add(new File([new Uint8Array(20*1024*1024+1)],'too-large.bin',{type:'application/octet-stream'})); const input=document.querySelector('.files-upload input[type=file]'); input.files=selection.files; input.dispatchEvent(new Event('change',{bubbles:true})); return null})()");
-        await(webView, "document.querySelector('.files-dialog')?.getAttribute('aria-busy')==='false' && document.querySelector('.files-dialog [role=alert]').textContent.includes('too-large.bin 超过 20 MiB') && document.querySelectorAll('#selected-files .attachment-chip').length===4");
+        long uploadStarted = SystemClock.elapsedRealtime();
+        long initialPss = android.os.Debug.getPss();
+        java.util.concurrent.atomic.AtomicLong peakPss = new java.util.concurrent.atomic.AtomicLong(initialPss);
+        java.util.concurrent.ScheduledExecutorService memorySample = java.util.concurrent.Executors.newSingleThreadScheduledExecutor();
+        memorySample.scheduleWithFixedDelay(() -> peakPss.accumulateAndGet(android.os.Debug.getPss(), Math::max), 0, 100, TimeUnit.MILLISECONDS);
+        evaluate(webView, "(()=>{const bytes=Uint8Array.from(atob(" + JSONObject.quote(SYNTHETIC_PNG) + "),char=>char.charCodeAt(0)); const selection=new DataTransfer(); selection.items.add(new File([bytes],'mobile.png',{type:'image/png'})); selection.items.add(new File([new Uint8Array(20*1024*1024+1)],'large.bin',{type:'application/octet-stream'})); const input=document.querySelector('.files-upload input[type=file]'); input.files=selection.files; input.dispatchEvent(new Event('change',{bubbles:true})); return null})()");
+        await(webView, "document.querySelectorAll('#selected-files .attachment-chip').length===5 && JSON.parse(localStorage.getItem('codex-reach-uploads:android-fixture')||'[]').length===0");
+        memorySample.shutdownNow();
+        android.util.Log.i("CodexReachMobilePerf", new JSONObject().put("sample", "70-byte PNG and 20-MiB-plus-one zero-filled file")
+            .put("uploadMs", SystemClock.elapsedRealtime() - uploadStarted).put("appProcessPssBeforeKiB", initialPss)
+            .put("appProcessPeakPssKiB", peakPss.get()).toString());
         JSONArray uploads = stats().getJSONArray("uploadRequests");
-        assertEquals(1, uploads.length());
+        assertEquals(2, uploads.length());
         assertEquals("mobile.png", uploads.getJSONObject(0).getString("name"));
         assertEquals(70, uploads.getJSONObject(0).getInt("size"));
+        assertEquals(20 * 1024 * 1024 + 1, uploads.getJSONObject(1).getInt("size"));
         assertComposer(webView, QUOTED_DRAFT);
-        evaluate(webView, "document.querySelector('.files-dialog .dialog-header button').click(); null");
+        evaluate(webView, "document.querySelector('.files-dialog .dialog-header button').click(); document.querySelector('#manage-files').click(); null");
+        evaluate(webView, "document.querySelector('.attachment-manager [aria-label=\"移除附件 large.bin\"]').click(); document.querySelector('.attachment-manager .dialog-header button').click(); null");
+        await(webView, "document.querySelectorAll('#selected-files .attachment-chip').length===4");
         evaluate(webView, "document.querySelector('#selected-files [aria-label=\"预览图片 mobile.png\"]').click(); null");
         verifyPreview(webView, "mobile.png");
-        assertEquals(3, stats().getJSONArray("previewRequests").length());
+        assertTrue(stats().getJSONArray("previewRequests").length() >= 3);
         assertEquals(3, stats().getJSONArray("resolveRequests").length());
         assertComposer(webView, QUOTED_DRAFT);
         SystemClock.sleep(800);
@@ -195,7 +208,7 @@ public class OrganizationFlowTest {
         assertAttachment(attachments.getJSONObject(0), "C:/Example/desktop.txt", false, false);
         assertAttachment(attachments.getJSONObject(1), "C:/Example/docs", true, false);
         assertAttachment(attachments.getJSONObject(2), "C:/Example/photo.png", false, true);
-        assertAttachment(attachments.getJSONObject(3), "C:/Example/uploads/1/mobile.png", false, true);
+        assertAttachment(attachments.getJSONObject(3), "C:/Example/uploads/2026-11-13/mobile.png", false, true);
         setComposer(webView, "附件发送期间的新草稿");
         control("release-organization-message");
         await(webView, "document.querySelector('#delivery-note').hidden && document.querySelector('#selected-files').hidden && document.querySelector('#messages').textContent.includes('ORGANIZATION_ATTACHMENTS_OK')");
@@ -221,11 +234,11 @@ public class OrganizationFlowTest {
         assertComposer(webView, "最终保留草稿");
         assertEquals(2, stats().getInt("sendPosts"));
         assertEquals(2, stats().getInt("sendCount"));
-        assertEquals(1, stats().getJSONArray("uploadRequests").length());
+        assertEquals(2, stats().getJSONArray("uploadRequests").length());
     }
 
     private void openPicker(WebView webView) throws Exception {
-        evaluate(webView, "document.querySelector('#files-button').click(); null");
+        evaluate(webView, "document.querySelector('#files-button').click(); document.querySelector('#add-files').click(); null");
         await(webView, "document.querySelector('.files-dialog')?.open && document.querySelector('.files-dialog').getAttribute('aria-busy')==='false' && Boolean(document.querySelector('.files-entry[aria-label=\"选择文件 desktop.txt\"]'))");
     }
 
@@ -234,10 +247,10 @@ public class OrganizationFlowTest {
     }
 
     private void verifyPreview(WebView webView, String name) throws Exception {
-        await(webView, "document.querySelector('.attachment-preview')?.open && !document.querySelector('.attachment-preview-image').hidden && document.querySelector('.attachment-preview-image').complete && document.querySelector('.attachment-preview-image').naturalWidth===1");
-        assertEquals("true", evaluate(webView, "document.querySelector('.attachment-preview-image').alt===" + JSONObject.quote(name)));
-        evaluate(webView, "document.querySelector('.attachment-preview .dialog-header button').click(); null");
-        await(webView, "!document.querySelector('.attachment-preview')");
+        await(webView, "document.querySelector('.reader-dialog')?.open && document.querySelector('.reader-image')?.complete && document.querySelector('.reader-image').naturalWidth===1");
+        assertEquals("true", evaluate(webView, "document.querySelector('.reader-image').alt===" + JSONObject.quote(name)));
+        evaluate(webView, "document.querySelector('.reader-dialog .dialog-header button').click(); null");
+        await(webView, "!document.querySelector('.reader-dialog')");
     }
 
     private void assertAttachment(JSONObject attachment, String path, boolean directory, boolean image) throws Exception {

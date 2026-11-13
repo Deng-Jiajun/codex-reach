@@ -1,16 +1,22 @@
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
+import { renderMarkdown, copyText, sourceText, sourceRange, rangeOffsets } from './message-content';
 import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
 import { groupMessages, groupProcessMessages, type MessageGroup, type ProcessGroup } from './transcript';
 import { populateParameters, selectedParameters, updateThinking } from './task-options';
 import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
-import { openFilePicker, renderAttachments, type FileAttachment } from './files';
-import { annotationPrompt, createSelectionToolbar, openAnnotation, renderAnnotations } from './chat-actions';
-import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, ResponseAnnotation, Skill, Thread, Turn, TurnOptions } from './types';
+import { openFilePicker, openAttachmentManager, renderAttachments, type FileAttachment } from './files';
+import { recoverUploads, uploadCount } from './uploads';
+import { groupThreads, threadTitle, type Grouping } from './thread-list';
+import { openReader } from './reader';
+import { openContextPicker, bindMention } from './context-picker';
+import { openQueue, type QueueItem } from './queue';
+import { openChanges, openDeletion } from './organization';
+import { connectNotifications, initializeNotifications, openNotificationSettings, type TaskEvent } from './notifications';
+import { annotationPrompt, createSelectionToolbar, openAnnotation, openAnnotationDetail, renderAnnotations } from './chat-actions';
+import type { Connection, EditableTurn, HistoryPage, LiveView, Message, ModelChoice, Project, QuestionReply, Receipt, ResponseAnnotation, Skill, Thread, ThreadReference, Turn, TurnOptions } from './types';
 import './style.css';
 
 const element = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -28,7 +34,6 @@ const olderButton = element<HTMLButtonElement>('older-button');
 const stopButton = element<HTMLButtonElement>('stop-button');
 const newDialog = element<HTMLDialogElement>('new-chat-dialog');
 const optionsDialog = element<HTMLDialogElement>('options-dialog');
-const skillsDialog = element<HTMLDialogElement>('skills-dialog');
 const editDialog = element<HTMLDialogElement>('edit-dialog');
 const newModel = element<HTMLSelectElement>('new-chat-model');
 const newThinking = element<HTMLSelectElement>('new-chat-thinking');
@@ -37,6 +42,7 @@ const optionsThinking = element<HTMLSelectElement>('options-thinking');
 const scroll = element<HTMLDivElement>('messages-scroll');
 const cache = new ChatCache();
 const renderedMessages = new Map<string, HTMLElement>();
+const messageAnnotations = new Map<string, ResponseAnnotation[]>();
 let currentView: typeof views[number] = 'connection';
 let settingsReturnView: 'inbox' | 'chat' | null = null;
 let settingsScrollTop = 0;
@@ -58,17 +64,21 @@ let modelChoices: ModelChoice[] = [];
 let selectedPinned: boolean | undefined;
 const pinRequests = new Set<string>();
 const pinRevisions = new Map<string, number>();
+const readAttempts = new Map<string, string>();
+const readRevisions = new Map<string, number>();
+const readOperations = new Map<string, Promise<void>>();
 const pinIcon = '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3h8l-1 7 4 4v2H5v-2l4-4-1-7ZM12 16v5"/></svg>';
 let dialogRequest = 0;
 let newFormLoading = false;
 let newFormError = '';
 let optionsChatId = '';
-let skillsChatId = '';
-let skillChoices: Skill[] = [];
 let selectedSkills: Skill[] = [];
+let selectedThreads: ThreadReference[] = [];
+let newSkills: Skill[] = [];
+let newThreads: ThreadReference[] = [];
+let addingToNew = false;
 let selectedFiles: FileAttachment[] = [];
 let selectedAnnotations: ResponseAnnotation[] = [];
-let skillDraft = new Set<string>();
 let liveRequests: PendingRequest[] = [];
 let editableTurn: EditableTurn | null = null;
 let editing: (EditableTurn & { chatId: string }) | null = null;
@@ -88,6 +98,9 @@ let connected = false;
 let projects: Project[] = [];
 let threads: Thread[] = [];
 let nextThreads: string | null = null;
+let archivedList = false;
+let grouping: Grouping = (['date', 'project', 'status'].includes(localStorage.getItem('codex-reach-grouping') ?? '')
+  ? localStorage.getItem('codex-reach-grouping') : 'date') as Grouping;
 let selected: HistoryPage | null = null;
 let revision: string | null = null;
 let generation = 0;
@@ -95,7 +108,10 @@ let foreground = true;
 let liveWaiting = false;
 let liveModel = '';
 let liveThinking = '';
-let pending: { requestId: string; prompt: string; status?: string; error?: string; options?: TurnOptions; questionReplies?: QuestionReply[]; annotations?: ResponseAnnotation[] } | null = null;
+let pending: { requestId: string; prompt: string; status?: string; error?: string; options?: TurnOptions; questionReplies?: QuestionReply[]; annotations?: ResponseAnnotation[]; queued?: boolean } | null = null;
+let queueItems: QueueItem[] = [];
+let notificationTarget: TaskEvent | null = null;
+let applicationReady = false;
 let cacheTimer: ReturnType<typeof setTimeout> | undefined;
 let cacheWriting = false;
 const pendingCache = new Map<string, { serverId: string; page: HistoryPage; revision: string | null }>();
@@ -221,9 +237,10 @@ async function connect(): Promise<void> {
     }
     const candidate: Connection = { url: url.origin, key: keyInput.value.trim(), serverId: '' };
     const nextClient = new ReachClient(candidate);
-    const status = await nextClient.request<{ serverId: string }>('/status');
+    const status = await nextClient.request<{ serverId: string; desktopLocale?: string | null }>('/status');
     if (attempt !== connectionAttempt) return;
     candidate.serverId = status.serverId;
+    candidate.desktopLocale = status.desktopLocale;
     const sameServer = candidate.serverId === connection?.serverId;
     const returnToChat = settingsReturnView === 'chat' && sameServer;
     stopUpdates();
@@ -240,6 +257,8 @@ async function connect(): Promise<void> {
     }
     connection = candidate;
     client = nextClient;
+    void connectNotifications(nextClient).catch(error => inform(`提醒连接未启动。${errorText(error)}`));
+    void recoverUploads(nextClient);
     connected = true;
     connectionError = '';
     localStorage.setItem('codex-reach-connection', JSON.stringify(candidate));
@@ -266,15 +285,18 @@ async function loadInbox(token: number): Promise<void> {
   if (!client) return;
   void client.loadModels().catch(() => {});
   const revisions = new Map(pinRevisions);
+  const unreadRevisions = new Map(readRevisions);
   const [projectResult, threadResult] = await Promise.all([
     client.request<{ projects: Project[] }>('/projects'),
-    client.request<{ threads: Thread[]; nextCursor: string | null }>('/threads'),
+    client.request<{ threads: Thread[]; nextCursor: string | null }>(`/threads?archived=${archivedList}`),
   ]);
   if (token !== generation) return;
   projects = projectResult.projects;
   threads = threadResult.threads.map(thread => {
     thread.pinned = Boolean(thread.pinned);
     const current = threads.find(item => item.id === thread.id);
+    if (thread.isUnread == null || readOperations.has(thread.id) || unreadRevisions.get(thread.id) !== readRevisions.get(thread.id)) thread.isUnread = current?.isUnread ?? readStored<Record<string, boolean>>(storageKey('unread'))?.[thread.id];
+    else rememberUnread(thread.id, thread.isUnread);
     if (current && (pinRequests.has(thread.id) || revisions.get(thread.id) !== pinRevisions.get(thread.id))) {
       thread.pinned = current.pinned;
     }
@@ -286,6 +308,7 @@ async function loadInbox(token: number): Promise<void> {
   for (const project of projects) projectFilter.add(new Option(project.name, project.id));
   projectFilter.value = selectedProject;
   renderInbox();
+  void refreshThreadStates(token);
   const selectedThread = threads.find(thread => thread.id === selected?.id);
   if (selectedThread) selectedPinned = Boolean(selectedThread.pinned);
   if (selected && selectedThread?.title) {
@@ -328,16 +351,152 @@ async function refreshInbox(): Promise<void> {
   }
 }
 
-function renderPin(button: HTMLButtonElement, id: string): void {
-  const pinned = threads.find(item => item.id === id)?.pinned ?? (selected?.id === id ? selectedPinned : undefined);
-  const label = pinned === undefined ? '读取置顶状态' : pinned ? '取消置顶' : '置顶对话';
-  button.innerHTML = pinIcon;
-  button.setAttribute('aria-pressed', String(Boolean(pinned)));
-  button.setAttribute('aria-label', label);
-  button.title = label;
-  button.setAttribute('aria-busy', String(pinRequests.has(id)));
-  button.disabled = !connected || pinRequests.has(id);
+function renderSelectedPin(): void {
+  element('chat-pinned').innerHTML = pinIcon;
+  element('chat-pinned').hidden = !selectedPinned;
 }
+
+function menuDialog(title: string): { dialog: HTMLDialogElement; body: HTMLElement; error: HTMLElement } {
+  const dialog = document.createElement('dialog'); dialog.className = 'task-dialog menu-dialog';
+  const heading = document.createElement('div'); heading.className = 'dialog-header';
+  const close = document.createElement('button'); close.type = 'button'; close.className = 'quiet'; close.textContent = '返回';
+  close.addEventListener('click', () => dialog.close());
+  const label = document.createElement('h2'); label.textContent = title;
+  heading.append(close, label);
+  const body = document.createElement('div'); body.className = 'menu-actions';
+  const error = document.createElement('p'); error.className = 'form-error'; error.setAttribute('role', 'status');
+  dialog.append(heading, body, error);
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  document.body.append(dialog); dialog.showModal();
+  return { dialog, body, error };
+}
+
+function openThreadMenu(thread: Thread): void {
+  const menu = menuDialog(threadTitle(thread));
+  const detail = document.createElement('p'); detail.className = 'field-note thread-detail';
+  detail.textContent = [thread.cwd, thread.updatedAt ? new Date(thread.updatedAt * 1000).toLocaleString('zh-CN') : '', thread.waitingTargets?.length ? `正在等待 ${thread.waitingTargets.map(threadTitle).join('、')}` : ''].filter(Boolean).join('\n');
+  menu.body.append(detail);
+  const action = (name: string, run: () => Promise<void>) => {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; button.textContent = name;
+    button.disabled = !connected;
+    button.addEventListener('click', async () => {
+      button.disabled = true; menu.error.textContent = '';
+      try { await run(); menu.dialog.close(); }
+      catch (error) { menu.error.textContent = errorText(error); }
+      finally { button.disabled = !connected; }
+    });
+    menu.body.append(button);
+  };
+  action(thread.pinned ? '取消置顶' : '置顶', () => togglePin(thread.id));
+  const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'quiet'; rename.textContent = '改名'; rename.disabled = !connected;
+  rename.addEventListener('click', () => {
+    menu.body.replaceChildren();
+    const form = document.createElement('form');
+    const label = document.createElement('label'); label.textContent = '对话名称';
+    const input = document.createElement('input'); input.value = threadTitle(thread); input.maxLength = 60; input.required = true; label.append(input);
+    const save = document.createElement('button'); save.type = 'submit'; save.className = 'primary'; save.textContent = '保存名称';
+    form.append(label, save); menu.body.append(form); input.focus(); input.select();
+    form.addEventListener('submit', async event => {
+      event.preventDefault(); if (!client || !input.value.trim()) return;
+      save.disabled = true;
+      try {
+        const result = await client.request<{ title: string }>(`/threads/${encodeURIComponent(thread.id)}/title`, 'POST', { title: input.value.trim() });
+        thread.title = result.title;
+        if (selected?.id === thread.id) { selected.title = thread.title; renderChat(); scheduleCache(); }
+        renderInbox(); menu.dialog.close();
+      } catch (error) { menu.error.textContent = errorText(error); }
+      finally { save.disabled = false; }
+    });
+  });
+  menu.body.append(rename);
+  action(thread.isUnread === false ? '标为未读' : '标为已读', async () => {
+    const read = thread.isUnread !== false;
+    await setRead(thread.id, read);
+    if (selected?.id === thread.id) readAttempts.set(thread.id, revision ?? 'history');
+    renderInbox();
+  });
+  action(archivedList ? '恢复到对话列表' : '归档', async () => {
+    await client!.request(`/threads/${encodeURIComponent(thread.id)}/archive`, 'POST', { archived: !archivedList });
+    await invalidateChats([thread.id]);
+    backToInbox();
+  });
+  action('改动文件', async () => { openChanges(client!, thread.id, thread.cwd); });
+  if (selected?.id === thread.id) action('在对话中查找', async () => { openChatSearch(); });
+  action('永久删除', async () => { openDeletion(client!, thread, async ids => { await invalidateChats(ids); backToInbox(); }); });
+}
+
+async function invalidateChats(ids: string[]): Promise<void> {
+  if (!connection) return;
+  if (selected && ids.includes(selected.id)) { stopUpdates(); selected = null; }
+  for (const id of ids) pendingCache.delete(`${connection.serverId}:${id}`);
+  await cache.remove(connection.serverId, ids);
+  threads = threads.filter(thread => !ids.includes(thread.id));
+}
+
+async function setRead(id: string, read: boolean): Promise<void> {
+  if (!client) return;
+  const current = client;
+  const version = (readRevisions.get(id) ?? 0) + 1;
+  readRevisions.set(id, version);
+  const operation = (readOperations.get(id) ?? Promise.resolve()).catch(() => {}).then(async () => {
+    await current.request(`/threads/${encodeURIComponent(id)}/read`, 'POST', { read });
+    if (client === current && readRevisions.get(id) === version) { rememberUnread(id, !read); renderInbox(); }
+  });
+  readOperations.set(id, operation);
+  try { await operation; }
+  finally { if (readOperations.get(id) === operation) { readOperations.delete(id); readRevisions.set(id, version + 1); } }
+}
+
+async function refreshThreadStates(token: number): Promise<void> {
+  const stateClient = client;
+  if (!stateClient) return;
+  const active = threads.filter(thread => ['active', 'inProgress'].includes(thread.status));
+  for (let offset = 0; offset < active.length && token === generation; offset += 3) {
+    await Promise.allSettled(active.slice(offset, offset + 3).map(async thread => {
+      const summary = await stateClient.request<Pick<Thread, 'status' | 'waitingForUser' | 'waitingForThread' | 'waitingTargets'> & { available: boolean }>(`/threads/${encodeURIComponent(thread.id)}/state`);
+      if (token !== generation || !summary.available) return;
+      const current = threads.find(item => item.id === thread.id);
+      if (current) Object.assign(current, summary);
+    }));
+    if (token === generation) renderInbox();
+  }
+}
+
+function rememberUnread(id: string, unread: boolean): void {
+  const known = readStored<Record<string, boolean>>(storageKey('unread')) ?? {};
+  known[id] = unread;
+  localStorage.setItem(storageKey('unread'), JSON.stringify(known));
+  const thread = threads.find(item => item.id === id);
+  if (thread) thread.isUnread = unread;
+}
+
+function markLatestRead(): void {
+  if (!selected || !client || !foreground || currentView !== 'chat' || !historyLoaded || syncing || historyError || streamError
+    || document.querySelector('dialog[open]') || scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight >= 90) return;
+  const id = selected.id;
+  const unread = threads.find(thread => thread.id === id)?.isUnread ?? readStored<Record<string, boolean>>(storageKey('unread'))?.[id];
+  const stamp = revision ?? 'history';
+  if (unread !== true || readAttempts.get(id) === stamp) return;
+  readAttempts.set(id, stamp);
+  void setRead(id, true).catch(() => { /* Preserve unread state until a later sync or an explicit read-state action */ });
+}
+
+element('list-menu-button').addEventListener('click', () => {
+  const menu = menuDialog('对话列表');
+  const legend = document.createElement('h3'); legend.textContent = '分组方式'; menu.body.append(legend);
+  for (const [value, name] of [['date', '日期'], ['project', '项目'], ['status', '状态']] as const) {
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet';
+    button.setAttribute('role', 'menuitemradio'); button.setAttribute('aria-checked', String(grouping === value));
+    button.textContent = `${grouping === value ? '✓ ' : ''}${name}`;
+    button.addEventListener('click', () => { grouping = value; localStorage.setItem('codex-reach-grouping', value); renderInbox(); menu.dialog.close(); });
+    menu.body.append(button);
+  }
+  const archive = document.createElement('button'); archive.type = 'button'; archive.className = 'quiet'; archive.textContent = archivedList ? '查看当前对话' : '查看已归档对话';
+  archive.addEventListener('click', () => { archivedList = !archivedList; threads = []; nextThreads = null; menu.dialog.close(); renderInbox(); void refreshInbox(); });
+  menu.body.append(archive);
+  const notifications = document.createElement('button'); notifications.type = 'button'; notifications.className = 'quiet'; notifications.textContent = '任务提醒';
+  notifications.addEventListener('click', () => { menu.dialog.close(); if (client) openNotificationSettings(client); }); menu.body.append(notifications);
+});
 
 async function togglePin(id: string): Promise<void> {
   if (!client || !connected || pinRequests.has(id)) return;
@@ -346,7 +505,7 @@ async function togglePin(id: string): Promise<void> {
   pinRequests.add(id);
   pinRevisions.set(id, (pinRevisions.get(id) ?? 0) + 1);
   renderInbox();
-  if (selected) renderPin(element<HTMLButtonElement>('chat-pin-button'), selected.id);
+  if (selected) renderSelectedPin();
   try {
     const path = `/threads/${encodeURIComponent(id)}/pin`;
     const result = pinned === undefined
@@ -363,7 +522,7 @@ async function togglePin(id: string): Promise<void> {
       pinRequests.delete(id);
       pinRevisions.set(id, (pinRevisions.get(id) ?? 0) + 1);
       renderInbox();
-      if (selected) renderPin(element<HTMLButtonElement>('chat-pin-button'), selected.id);
+      if (selected) renderSelectedPin();
     }
   }
 }
@@ -373,33 +532,46 @@ function renderInbox(): void {
   const projectId = projectFilter.value;
   const visible = threads.filter(thread => (!query || (thread.title || '').toLocaleLowerCase().includes(query))
     && (!projectId || (projectId === '__none__' ? !thread.projectId : thread.projectId === projectId)))
-    .sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
+    ;
   const fragment = document.createDocumentFragment();
-  for (const thread of visible) {
+  element('list-scope').textContent = `${archivedList ? '已归档 · ' : ''}已加载 ${threads.length} 条${query ? ` · 匹配 ${visible.length} 条` : ''}`;
+  for (const group of groupThreads(visible, projects, grouping)) {
+    const heading = document.createElement('h2');
+    heading.className = 'thread-group-title'; heading.textContent = group.title;
+    fragment.append(heading);
+    for (const thread of group.threads) {
     const row = document.createElement('div');
     row.className = 'thread-entry';
-    const pin = document.createElement('button');
-    pin.className = 'quiet icon-button pin-button';
-    pin.type = 'button';
-    pin.dataset.pinId = thread.id;
-    renderPin(pin, thread.id);
-    pin.addEventListener('click', () => void togglePin(thread.id));
     const button = document.createElement('button');
     button.className = 'thread-row';
     button.type = 'button';
     button.dataset.threadId = thread.id;
     const title = document.createElement('span');
     title.className = 'thread-title';
-    title.textContent = thread.title || '未命名对话';
-    const metadata = document.createElement('span');
-    metadata.className = 'thread-meta';
-    const project = projects.find(item => item.id === thread.projectId);
-    const date = new Date(thread.updatedAt * 1000).toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' });
-    metadata.textContent = [project?.name ?? '无项目', date, stateLabel(thread.status)].filter(Boolean).join(' · ');
-    button.append(title, metadata);
-    button.addEventListener('click', () => void openChat(thread.id));
-    row.append(pin, button);
+    title.textContent = threadTitle(thread);
+    button.append(title);
+    button.title = `${threadTitle(thread)}\n${thread.cwd}\n${new Date(thread.updatedAt * 1000).toLocaleString('zh-CN')}`;
+    if (thread.isUnread) { const unread = document.createElement('span'); unread.className = 'unread-dot'; unread.setAttribute('aria-label', '未读'); button.append(unread); }
+    if (thread.pinned) { const pin = document.createElement('span'); pin.className = 'static-pin'; pin.innerHTML = pinIcon; pin.setAttribute('aria-label', '已置顶'); button.append(pin); }
+    const state = thread.waitingForUser ? '待处理' : thread.waitingForThread ? '等待对话' : stateLabel(thread.status);
+    if (state) { const status = document.createElement('span'); status.className = 'thread-status'; status.textContent = state; button.append(status); }
+    let press: ReturnType<typeof setTimeout> | undefined;
+    let held = false;
+    let origin = { x: 0, y: 0 };
+    const cancel = () => { clearTimeout(press); press = undefined; };
+    button.addEventListener('pointerdown', event => {
+      if (event.button !== 0) return;
+      held = false; origin = { x: event.clientX, y: event.clientY };
+      press = setTimeout(() => { held = true; openThreadMenu(thread); }, 500);
+    });
+    button.addEventListener('pointermove', event => { if (Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 12) cancel(); });
+    button.addEventListener('pointerup', cancel);
+    button.addEventListener('pointercancel', cancel);
+    button.addEventListener('contextmenu', event => { event.preventDefault(); cancel(); if (!held) openThreadMenu(thread); held = true; });
+    button.addEventListener('click', () => { if (!held) void openChat(thread.id); held = false; });
+    row.append(button);
     fragment.append(row);
+    }
   }
   if (!visible.length) {
     const empty = document.createElement('p');
@@ -460,6 +632,7 @@ async function reportReadError(error: unknown, token: number, kind: 'history' | 
 }
 
 async function openChat(id: string, pinned?: boolean): Promise<void> {
+  readAttempts.delete(id);
   stopUpdates();
   const token = generation;
   revision = null;
@@ -481,6 +654,9 @@ async function openChat(id: string, pinned?: boolean): Promise<void> {
   stopOperation = readStored(storageKey('stop', id));
   interaction = readStored(storageKey('interaction', id));
   selectedSkills = readStored<Skill[]>(storageKey('skills', id)) ?? [];
+  selectedThreads = readStored<ThreadReference[]>(storageKey('thread-refs', id)) ?? [];
+  queueItems = [];
+  void refreshQueue();
   selectedFiles = readStored<FileAttachment[]>(storageKey('attachments', id)) ?? [];
   selectedAnnotations = readStored<ResponseAnnotation[]>(storageKey('annotations', id)) ?? [];
   questionReplies = readStored<QuestionReply[]>(storageKey('question-replies', id)) ?? [];
@@ -559,6 +735,7 @@ async function followChat(id: string, token: number): Promise<void> {
         continue;
       }
       selected.turns = merged;
+      if (runtimeStatus !== view.status) void refreshQueue();
       if (view.title) selected.title = view.title;
       selected.status = view.status ?? selected.status;
       runtimeStatus = view.status ?? null;
@@ -591,6 +768,53 @@ async function followChat(id: string, token: number): Promise<void> {
   }
 }
 
+async function loadAnnotationSource(annotation: ResponseAnnotation): Promise<Message> {
+  if (!selected || !annotation.source) throw new Error('来源不可用，摘录已保留');
+  const token = generation;
+  const find = () => selected?.turns.flatMap(turn => turn.messages).find(message => message.id === annotation.source!.messageId);
+  let source = find();
+  while (!source && selected.nextCursor && client) {
+    const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(selected.id)}/history?cursor=${encodeURIComponent(selected.nextCursor)}`);
+    if (token !== generation) throw new Error('已切换对话');
+    selected = prependHistory(selected, page);
+    source = find();
+  }
+  if (!source) throw new Error('来源已不可用，摘录已保留');
+  return source;
+}
+
+async function showAnnotationSource(annotation: ResponseAnnotation): Promise<void> {
+  const source = await loadAnnotationSource(annotation);
+  const dialog = document.createElement('dialog');
+  dialog.className = 'task-dialog annotation-detail';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'quiet';
+  close.textContent = '返回引用';
+  close.addEventListener('click', () => dialog.close());
+  const content = document.createElement('div');
+  content.className = 'message-content';
+  renderMarkdown(content, source.text, source.requestAnnotations ?? [], client, () => {}, selected?.cwd);
+  dialog.append(close, content);
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  let start = annotation.source!.contentOffsets?.startOffset ?? annotation.source!.startOffset;
+  let end = annotation.source!.contentOffsets?.endOffset ?? annotation.source!.endOffset;
+  if (!annotation.source!.contentOffsets) {
+    const text = sourceText(content);
+    const found = text.indexOf(annotation.text);
+    if (found >= 0 && text.indexOf(annotation.text, found + 1) < 0) { start = found; end = found + annotation.text.length; }
+  }
+  const range = sourceRange(content, start, end);
+  if (range) {
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    const target = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+    target?.scrollIntoView({ block: 'center' });
+  }
+}
+
 function renderMessage(message: Message, key: string, answers: Map<string, string>, process = false): HTMLElement {
   let node = renderedMessages.get(key);
   if (!node) {
@@ -606,6 +830,12 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
     const actions = document.createElement('div');
     actions.className = 'message-actions';
     node.append(actions);
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'quiet copy-message';
+    copy.textContent = '复制';
+    copy.addEventListener('click', () => void copyText(node!.dataset.copyText ?? '', copy));
+    actions.append(copy);
     const annotations = document.createElement('div');
     annotations.className = 'message-annotations';
     node.prepend(annotations);
@@ -636,14 +866,19 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
   const questionText = message.questions?.map(question => [question.title, ...(question.options ?? []).map(option => `- ${option}`)].join('\n')).join('\n\n');
   const body = message.questionReplies?.length ? message.questionReplies.map(reply => `${reply.question}\n${reply.answer}`).join('\n\n')
     : questionText === message.text ? '' : message.text;
-  if (node.dataset.body !== body) {
-    content.hidden = !body;
+  const annotations = messageAnnotations.get(key) ?? [];
+  node.dataset.copyText = [...(message.responseAnnotations ?? []).map((annotation, index) =>
+    `引用 ${index + 1}\n${annotation.text}${annotation.annotation ? `\n${annotation.annotation}` : ''}`), body].filter(text => text.trim()).join('\n\n');
+  const annotationKey = JSON.stringify([annotations, connection?.desktopLocale]);
+  if (node.dataset.body !== body || node.dataset.annotationKey !== annotationKey) {
+    content.hidden = !body.trim();
     if (message.kind === 'user' || message.kind === 'tool') content.textContent = body;
-    else content.innerHTML = DOMPurify.sanitize(marked.parse(body, { async: false }), { FORBID_TAGS: ['img', 'iframe', 'form'], FORBID_ATTR: ['style'] });
+    else renderMarkdown(content, body, annotations, client, (annotation, index) => openAnnotationDetail(annotation, index, showAnnotationSource), selected?.cwd);
     node.dataset.body = body;
+    node.dataset.annotationKey = annotationKey;
   }
   const edit = node.querySelector<HTMLButtonElement>('.edit-message');
-  renderAnnotations(node.querySelector<HTMLElement>('.message-annotations')!, message.responseAnnotations ?? []);
+  renderAnnotations(node.querySelector<HTMLElement>('.message-annotations')!, message.responseAnnotations ?? [], undefined, undefined, showAnnotationSource);
   renderAttachments(node.querySelector<HTMLElement>('.message-attachments')!, message.attachments ?? [], { client });
   if (edit) {
     edit.hidden = !editableTurn || key !== `${editableTurn.turnId}:${editableTurn.messageId}`;
@@ -723,8 +958,8 @@ function renderChat(forceBottom = false): void {
   if (!selected) return;
   selectionToolbar.setDisabled(Boolean(pending));
   const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 90;
-  element('chat-title').textContent = selected.title || '未命名对话';
-  element('chat-title').title = selected.title || '未命名对话';
+  element('chat-title').textContent = threadTitle(selected);
+  element('chat-title').title = threadTitle(selected);
   element('chat-meta').textContent = [selected.cwd, liveModel, liveThinking].filter(Boolean).join(' · ');
   element('chat-state').textContent = stateLabel(runtimeStatus ?? '');
   element('chat-state').dataset.status = runtimeStatus ?? '';
@@ -771,6 +1006,13 @@ function renderChat(forceBottom = false): void {
     localStorage.setItem(storageKey('question-drafts', selected.id), JSON.stringify(questionDrafts));
   }
   const usedGroups = new Set<HTMLElement>();
+  messageAnnotations.clear();
+  for (const turn of selected.turns) {
+    const annotations = turn.messages.find(message => message.kind === 'user')?.responseAnnotations ?? [];
+    for (const message of turn.messages) {
+      messageAnnotations.set(`${turn.id}:${message.id}`, message.requestAnnotations ?? annotations);
+    }
+  }
   for (const turn of selected.turns) {
     const groups = groupMessages(turn.messages);
     for (const [index, group] of groups.entries()) {
@@ -795,8 +1037,13 @@ function renderChat(forceBottom = false): void {
   activity.textContent = runtimeStatus === null && liveRequests.length ? '等待电脑端重新同步请求…' : liveWaiting ? '等待处理请求' : '正在处理…';
   activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active' && !liveRequests.length);
   sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-    || (!messageInput.value.trim() && !selectedFiles.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
-  sendButton.textContent = runtimeStatus === 'active' ? '追加' : '发送';
+    || (!messageInput.value.trim() && !selectedFiles.length && !selectedSkills.length && !selectedThreads.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
+  const queued = runtimeStatus === 'active' && element<HTMLSelectElement>('send-mode').value === 'queue';
+  sendButton.textContent = queued ? '排队' : runtimeStatus === 'active' ? '立即追加' : '发送';
+  element('send-mode-label').hidden = runtimeStatus !== 'active';
+  element('queue-button').textContent = `队列${queueItems.filter(item => !['accepted', 'cancelled'].includes(item.status)).length ? `（${queueItems.filter(item => !['accepted', 'cancelled'].includes(item.status)).length}）` : ''}`;
+  element('queue-button').hidden = runtimeStatus !== 'active' && !queueItems.length;
+  element('queue-button').parentElement!.hidden = element('queue-button').hidden && runtimeStatus !== 'active';
   stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
   stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
   stopButton.setAttribute('aria-label', stopOperation ? '正在停止' : '停止任务');
@@ -807,7 +1054,7 @@ function renderChat(forceBottom = false): void {
   element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
   element<HTMLButtonElement>('skills-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
   element<HTMLButtonElement>('files-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
-  renderPin(element<HTMLButtonElement>('chat-pin-button'), selected.id);
+  renderSelectedPin();
   element('open-attachment-chat').hidden = !selectedFiles.length || runtimeStatus !== null;
   element<HTMLButtonElement>('open-attachment-chat').disabled = !connected || opening;
   renderAttachments(element('selected-files'), selectedFiles, { client, onRemove: pending ? undefined : index => {
@@ -815,22 +1062,42 @@ function renderChat(forceBottom = false): void {
     localStorage.setItem(storageKey('attachments', selected!.id), JSON.stringify(selectedFiles));
     renderChat();
   } });
+  const uploading = client ? uploadCount(client, storageKey('attachments', selected.id)) : 0;
+  sendButton.disabled ||= uploading > 0;
+  element('manage-files').hidden = !selectedFiles.length && !uploading;
+  element('manage-files').textContent = `附件（${selectedFiles.length}）${uploading ? ` · ${uploading} 项上传` : ''}`;
   renderAnnotations(element('selected-annotations'), selectedAnnotations, pending ? undefined : index => {
     selectedAnnotations.splice(index, 1);
     localStorage.setItem(storageKey('annotations', selected!.id), JSON.stringify(selectedAnnotations));
     renderChat();
-  }, pending ? undefined : index => {
+  }, pending ? undefined : async index => {
     const annotation = selectedAnnotations[index];
     const chatId = selected!.id;
-    const source = annotation.source!;
-    openAnnotation(annotation.text, source.messageId, { startOffset: 0, endOffset: annotation.text.length }, annotation.annotation, replacement => {
+    const save = (replacement: ResponseAnnotation) => {
       if (selected?.id !== chatId) return;
-      replacement.source!.startOffset += source.startOffset;
-      replacement.source!.endOffset += source.startOffset;
       selectedAnnotations[index] = replacement;
       localStorage.setItem(storageKey('annotations', chatId), JSON.stringify(selectedAnnotations));
       renderChat();
-    });
+    };
+    try {
+      const message = await loadAnnotationSource(annotation);
+      const content = document.createElement('div');
+      renderMarkdown(content, message.text, message.requestAnnotations ?? [], client, () => {}, selected?.cwd);
+      const nativeRange = annotation.source!.contentOffsets ?? annotation.source!;
+      const range = sourceRange(content, nativeRange.startOffset, nativeRange.endOffset);
+      if (!range) throw new Error('来源位置已变化');
+      openAnnotation(sourceText(content, false), annotation.source!.messageId,
+        { ...rangeOffsets(content, range, false), text: annotation.text }, annotation.annotation, replacement => {
+          const range = sourceRange(content, replacement.source!.startOffset, replacement.source!.endOffset, false);
+          if (!range) return;
+          const offsets = rangeOffsets(content, range);
+          save({ ...replacement, text: sourceText(range.cloneContents(), false), source: { messageId: annotation.source!.messageId, ...offsets, contentOffsets: offsets } });
+        });
+    } catch {
+      if (selected?.id !== chatId) return;
+      openAnnotation(annotation.text, annotation.source?.messageId ?? '', { startOffset: 0, endOffset: annotation.text.length }, annotation.annotation,
+        replacement => save({ ...annotation, annotation: replacement.annotation }), true);
+    }
   });
   renderSelectedSkills();
   element('interaction-note').hidden = !interaction || interaction.kind !== 'edit';
@@ -841,7 +1108,27 @@ function renderChat(forceBottom = false): void {
   element('delivery-text').textContent = pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
   element('resolve-delivery').hidden = pending?.status !== 'unknown';
   if (forceBottom || atBottom) scroll.scrollTop = scroll.scrollHeight;
+  updateReadingActions();
   selectionToolbar.refresh();
+}
+
+function updateReadingActions(): void {
+  const away = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight >= 90;
+  element('reading-actions').hidden = !away;
+  element('jump-requests').hidden = !liveRequests.length;
+  markLatestRead();
+  if (notificationTarget && selected && notificationTarget.threadId === selected.id && historyLoaded) {
+    const target = notificationTarget!;
+    const request = [...document.querySelectorAll<HTMLElement>('[data-request-id]')].find(node => node.dataset.requestId === JSON.stringify(target.requestId));
+    const turn = selected?.turns.find(turn => turn.id === target.turnId);
+    const message = turn && [...turn.messages].reverse().find(message => message.kind === 'assistant');
+    const answer = message && renderedMessages.get(`${turn!.id}:${message.id}`);
+    const node = target.requestId != null ? request : answer;
+    if (node) {
+      notificationTarget = null; node.scrollIntoView({ block: 'center' });
+      node.classList.add('search-highlight'); setTimeout(() => node.classList.remove('search-highlight'), 3000);
+    }
+  }
 }
 
 function scheduleCache(): void {
@@ -869,7 +1156,11 @@ async function checkReceipt(token: number): Promise<void> {
   if (!request || !chatId || !client) return;
   let receipt: Receipt;
   try {
-    receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(request.requestId)}`);
+    if (request.queued) {
+      const result = await client.request<{ items: QueueItem[] }>(`/threads/${encodeURIComponent(chatId)}/queue`);
+      const exists = result.items.some(item => item.requestId === request.requestId);
+      receipt = { requestId: request.requestId, chatId, status: exists ? 'accepted' : 'unknown', error: exists ? null : '电脑队列中尚未找到这条消息，请查询后再处理' };
+    } else receipt = await client.request<Receipt>(`/requests/${encodeURIComponent(request.requestId)}`);
   } catch (error) {
     if (!(error instanceof ReachError) || error.status !== 404) throw error;
     if (token !== generation || pending?.requestId !== request.requestId) return;
@@ -895,6 +1186,11 @@ async function checkReceipt(token: number): Promise<void> {
       selectedFiles = selectedFiles.filter(file => !sent.has(file.path));
       localStorage.setItem(storageKey('attachments', chatId), JSON.stringify(selectedFiles));
     }
+    if (request.options?.threadRefs?.length) {
+      const sent = new Set(request.options.threadRefs.map(thread => thread.id));
+      selectedThreads = selectedThreads.filter(thread => !sent.has(thread.id));
+      localStorage.setItem(storageKey('thread-refs', chatId), JSON.stringify(selectedThreads));
+    }
     if (request.annotations?.length) {
       const sent = new Set(request.annotations.map(annotation => JSON.stringify(annotation)));
       selectedAnnotations = selectedAnnotations.filter(annotation => !sent.has(JSON.stringify(annotation)));
@@ -909,6 +1205,7 @@ async function checkReceipt(token: number): Promise<void> {
       localStorage.setItem(storageKey('question-drafts', chatId), JSON.stringify(questionDrafts));
     }
     pending = null;
+    if (request.queued) { inform('已保存到电脑待发队列'); void refreshQueue(); }
     localStorage.removeItem(storageKey('pending', chatId));
     revision = null;
     syncing = true;
@@ -921,9 +1218,22 @@ async function checkReceipt(token: number): Promise<void> {
   renderChat();
 }
 
+async function refreshQueue(): Promise<void> {
+  if (!selected || !client) return;
+  const id = selected.id; const token = generation;
+  try {
+    const result = await client.request<{ items: QueueItem[] }>(`/threads/${encodeURIComponent(id)}/queue`);
+    if (token !== generation || selected?.id !== id) return;
+    queueItems = result.items; renderChat();
+  } catch { /* The queue panel provides its own actionable connection feedback. */ }
+}
+
+element('queue-button').addEventListener('click', () => { if (client && selected) openQueue(client, selected.id, selected.cwd, () => void refreshQueue()); });
+element('send-mode').addEventListener('change', () => renderChat());
+
 async function sendMessage(): Promise<void> {
-  if (selectedFiles.length && runtimeStatus === null) return;
-  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles }, undefined, selectedAnnotations);
+  if ((selectedFiles.length && runtimeStatus === null) || (client && selected && uploadCount(client, storageKey('attachments', selected.id)))) return;
+  await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles, threadRefs: selectedThreads }, undefined, selectedAnnotations, runtimeStatus === 'active' && element<HTMLSelectElement>('send-mode').value === 'queue');
 }
 
 async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
@@ -936,17 +1246,17 @@ async function submitQuestionReplies(replies: QuestionReply[]): Promise<void> {
   await sendPrompt(prompt, turnOptions, replies);
 }
 
-async function sendPrompt(prompt: string, options: TurnOptions, replies?: QuestionReply[], annotations: ResponseAnnotation[] = []): Promise<void> {
-  if (!selected || !client || !connected || pending || stopOperation || interaction || (!prompt.trim() && !options.attachments?.length && !annotations.length)) return;
+async function sendPrompt(prompt: string, options: TurnOptions, replies?: QuestionReply[], annotations: ResponseAnnotation[] = [], queued = false): Promise<void> {
+  if (!selected || !client || !connected || pending || stopOperation || interaction || (!prompt.trim() && !options.attachments?.length && !options.skills?.length && !options.threadRefs?.length && !annotations.length)) return;
   const id = selected.id;
   const token = generation;
-  const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies, annotations: [...annotations] };
+  const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies, annotations: [...annotations], queued };
   inform();
   pending = request;
   localStorage.setItem(storageKey('pending', id), JSON.stringify(request));
   renderChat();
   try {
-    await client.request(`/threads/${encodeURIComponent(id)}/messages`, 'POST', { requestId: request.requestId, prompt: annotationPrompt(request.prompt, request.annotations), ...request.options });
+    await client.request(`/threads/${encodeURIComponent(id)}/${queued ? 'queue' : 'messages'}`, 'POST', { requestId: request.requestId, prompt: annotationPrompt(request.prompt, request.annotations), ...request.options });
     while (token === generation && pending?.requestId === request.requestId && pending.status !== 'unknown') {
       await checkReceipt(token);
       if (pending) await new Promise(resolve => setTimeout(resolve, 500));
@@ -970,6 +1280,8 @@ function newChatDraft(): NewChatDraft {
     projectId: element<HTMLSelectElement>('new-chat-project').value || undefined,
     prompt: element<HTMLTextAreaElement>('new-chat-prompt').value,
     ...selectedParameters(newModel, newThinking),
+    attachments: readStored<FileAttachment[]>(storageKey('attachments', '__new__')) ?? [],
+    skills: newSkills, threadRefs: newThreads,
   };
 }
 
@@ -977,15 +1289,17 @@ function saveNewChatDraft(): void {
   if (!creation && connection) localStorage.setItem(storageKey('new-chat-draft'), JSON.stringify(newChatDraft()));
   const project = projects.find(item => item.id === element<HTMLSelectElement>('new-chat-project').value);
   element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
+  renderNewContext();
 }
 
 function renderCreation(): void {
+  renderNewContext();
   element<HTMLFieldSetElement>('new-chat-fields').disabled = Boolean(creation);
   const awaitingFirstCatalog = newFormLoading && !modelChoices.length;
   newModel.disabled = awaitingFirstCatalog;
   newThinking.disabled = awaitingFirstCatalog || !newModel.value;
   const button = element<HTMLButtonElement>('create-chat-button');
-  button.disabled = awaitingFirstCatalog || Boolean(creation);
+  button.disabled = awaitingFirstCatalog || Boolean(creation) || Boolean(client && uploadCount(client, storageKey('attachments', '__new__')));
   button.textContent = creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送';
   const catalogStatus = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   element('new-chat-status').textContent = newFormLoading ? catalogStatus
@@ -1016,6 +1330,8 @@ async function openNewChat(): Promise<void> {
   }
   projectSelect.value = draft.projectId ?? '';
   element<HTMLTextAreaElement>('new-chat-prompt').value = draft.prompt;
+  newSkills = draft.skills ?? []; newThreads = draft.threadRefs ?? [];
+  renderNewContext();
   modelChoices = client.cachedModels();
   newFormLoading = true;
   newFormError = '';
@@ -1041,7 +1357,7 @@ async function openNewChat(): Promise<void> {
 async function createChat(): Promise<void> {
   if (!client || !connection || creation || (newFormLoading && !modelChoices.length)) return;
   const draft = newChatDraft();
-  if (!draft.prompt.trim()) return;
+  if ((!draft.prompt.trim() && !draft.attachments?.length && !draft.skills?.length && !draft.threadRefs?.length) || (client && uploadCount(client, storageKey('attachments', '__new__')))) return;
   const serverId = connection.serverId;
   const request: Creation = { ...draft, requestId: crypto.randomUUID(), status: 'sending' };
   creation = request;
@@ -1095,6 +1411,8 @@ async function pollCreation(): Promise<void> {
         creation = null;
         localStorage.removeItem(storageKey('creation'));
         localStorage.removeItem(storageKey('new-chat-draft'));
+        localStorage.removeItem(storageKey('attachments', '__new__'));
+        newSkills = []; newThreads = [];
         if (newDialog.open) {
           newDialog.close();
           await openChat(threadId, false);
@@ -1133,6 +1451,23 @@ async function openParameters(): Promise<void> {
   element('options-catalog-status').hidden = false;
   element('options-catalog-status').textContent = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   optionsDialog.showModal();
+  element('approval-policy-label').hidden = true;
+  element('approval-policy-status').textContent = '正在读取审批策略…';
+  const policy = element<HTMLSelectElement>('approval-policy');
+  policy.dataset.original = ''; policy.replaceChildren();
+  void optionsClient.request<{ available: boolean; approvalPolicy: unknown; allowed: unknown[] | null }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
+    if (!current()) return;
+    if (!settings.available) { element('approval-policy-status').textContent = '桌面加载该对话后可设置审批策略'; return; }
+    const original = typeof settings.approvalPolicy === 'string' ? settings.approvalPolicy : '__custom__';
+    const labels: Record<string, string> = { untrusted: '仅信任操作自动执行', 'on-request': '由模型请求审批', never: '不请求审批' };
+    for (const [value, label] of Object.entries(labels)) if (!settings.allowed || settings.allowed.includes(value) || value === original) {
+      const option = new Option(label, value); option.disabled = Boolean(settings.allowed && !settings.allowed.includes(value)); policy.add(option);
+    }
+    if (original === '__custom__') policy.add(new Option('当前自定义策略', original));
+    policy.value = original; policy.dataset.original = original;
+    element('approval-policy-label').hidden = false;
+    element('approval-policy-status').textContent = '保存后用于后续轮次，当前轮次与已有审批继续按原设置处理。';
+  }).catch(error => { if (current()) element('approval-policy-status').textContent = `审批策略读取失败。${errorText(error)}`; });
   // Loaded sessions already provide these settings in their live snapshot
   if (!hasLiveSettings) void optionsClient.request<TurnOptions>(`/threads/${encodeURIComponent(id)}/settings`).then(settings => {
     if (!current() || (runtimeStatus !== null && liveModel && liveThinking)) return;
@@ -1211,91 +1546,87 @@ async function stopTask(): Promise<void> {
   if (token === generation) await checkStopReceipt(token);
 }
 
-function renderSelectedSkills(): void {
-  const container = element('selected-skills');
-  container.hidden = !selectedSkills.length;
-  const signature = JSON.stringify([selectedSkills, Boolean(pending)]);
-  if (container.dataset.signature === signature) return;
-  container.dataset.signature = signature;
+function renderReferences(container: HTMLElement, skills: Skill[], refs: ThreadReference[], remove: (kind: 'skill' | 'thread', id: string) => void, disabled = false): void {
+  container.hidden = !skills.length && !refs.length;
   container.replaceChildren();
-  for (const skill of selectedSkills) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'skill-chip';
-    button.textContent = `${skill.name} ×`;
-    button.setAttribute('aria-label', `移除 Skill ${skill.name}`);
-    button.disabled = Boolean(pending);
-    button.addEventListener('click', () => {
-      selectedSkills = selectedSkills.filter(item => item.path !== skill.path);
-      localStorage.setItem(storageKey('skills', selected!.id), JSON.stringify(selectedSkills));
-      renderSelectedSkills();
+  for (const item of [...skills.map(skill => ({ kind: 'skill' as const, id: skill.path, title: skill.name })),
+    ...refs.map(thread => ({ kind: 'thread' as const, id: thread.id, title: thread.title }))]) {
+    const group = document.createElement('span'); group.className = 'reference-chip';
+    const detail = document.createElement('button'); detail.type = 'button'; detail.className = 'quiet'; detail.textContent = item.title;
+    detail.addEventListener('click', () => {
+      if (item.kind === 'skill' && client) void openReader(item.id, client);
+      else {
+        const dialog = document.createElement('dialog'); dialog.className = 'task-dialog';
+        const title = document.createElement('h2'); title.textContent = item.title;
+        const id = document.createElement('p'); id.textContent = item.id;
+        const view = document.createElement('button'); view.className = 'quiet'; view.textContent = '查看引用对话';
+        view.addEventListener('click', () => { dialog.close(); newDialog.close(); void openChat(item.id); });
+        const close = document.createElement('button'); close.className = 'quiet'; close.textContent = '关闭'; close.addEventListener('click', () => dialog.close());
+        dialog.append(title, id, view, close); dialog.addEventListener('close', () => dialog.remove(), { once: true }); document.body.append(dialog); dialog.showModal();
+      }
     });
-    container.append(button);
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet'; button.textContent = '×';
+    button.setAttribute('aria-label', `移除 ${item.title}`); button.disabled = disabled;
+    button.addEventListener('click', () => remove(item.kind, item.id)); group.append(detail, button); container.append(group);
   }
 }
 
-function renderSkillChoices(): void {
-  const query = element<HTMLInputElement>('skills-search').value.trim().toLocaleLowerCase();
-  const list = element('skills-list');
-  list.replaceChildren();
-  for (const skill of skillChoices.filter(item => `${item.name} ${item.description ?? ''}`.toLocaleLowerCase().includes(query))) {
-    const label = document.createElement('label');
-    label.className = 'skill-choice';
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.value = skill.path;
-    checkbox.checked = skillDraft.has(skill.path);
-    checkbox.addEventListener('change', () => {
-      if (checkbox.checked) skillDraft.add(skill.path);
-      else skillDraft.delete(skill.path);
-    });
-    const text = document.createElement('span');
-    const name = document.createElement('strong');
-    name.textContent = skill.name;
-    const description = document.createElement('span');
-    description.className = 'field-note';
-    description.textContent = skill.shortDescription || skill.description || skill.path;
-    text.append(name, description);
-    label.append(checkbox, text);
-    list.append(label);
-  }
-  if (!list.childElementCount) {
-    const empty = document.createElement('p');
-    empty.className = 'field-note';
-    empty.textContent = '没有匹配的 Skill';
-    list.append(empty);
-  }
+function renderSelectedSkills(): void {
+  renderReferences(element('selected-skills'), selectedSkills, selectedThreads, (kind, id) => {
+    selectedSkills = kind === 'skill' ? selectedSkills.filter(skill => skill.path !== id) : selectedSkills;
+    selectedThreads = kind === 'thread' ? selectedThreads.filter(thread => thread.id !== id) : selectedThreads;
+    localStorage.setItem(storageKey('skills', selected!.id), JSON.stringify(selectedSkills));
+    localStorage.setItem(storageKey('thread-refs', selected!.id), JSON.stringify(selectedThreads));
+    renderChat();
+  }, Boolean(pending));
 }
 
-async function openSkills(): Promise<void> {
-  if (!selected || !client || pending) return;
-  skillsChatId = selected.id;
-  const id = skillsChatId;
-  const token = generation;
-  skillChoices = [];
-  skillDraft = new Set(selectedSkills.map(skill => skill.path));
-  element<HTMLInputElement>('skills-search').value = '';
-  element('skills-list').replaceChildren();
-  element('skills-status').textContent = '正在读取当前项目可用 Skill…';
-  element('open-skill-chat').hidden = true;
-  element<HTMLButtonElement>('save-skills').disabled = true;
-  showFormError('skills-error');
-  skillsDialog.showModal();
-  try {
-    const result = await client.request<{ skills: Skill[]; errors: { message: string }[]; sendingSupported?: boolean }>(`/threads/${encodeURIComponent(id)}/skills`);
-    if (token !== generation || selected?.id !== id || !skillsDialog.open) return;
-    skillChoices = result.skills;
-    renderSkillChoices();
-    element('skills-status').textContent = result.sendingSupported === false ? '此对话尚未在电脑端加载，请在电脑上打开后再发送 Skill。' : '所选 Skill 用于下一次发送。';
-    element('open-skill-chat').hidden = result.sendingSupported !== false;
-    showFormError('skills-error', result.errors.map(error => error.message).join('\n'));
-    element<HTMLButtonElement>('save-skills').disabled = false;
-  } catch (error) {
-    if (token === generation && skillsDialog.open) {
-      element('skills-status').textContent = '';
-      showFormError('skills-error', errorText(error));
+function renderNewContext(): void {
+  renderReferences(element('new-references'), newSkills, newThreads, (kind, id) => {
+    newSkills = kind === 'skill' ? newSkills.filter(skill => skill.path !== id) : newSkills;
+    newThreads = kind === 'thread' ? newThreads.filter(thread => thread.id !== id) : newThreads;
+    saveNewChatDraft();
+  }, Boolean(creation));
+  const files = readStored<FileAttachment[]>(storageKey('attachments', '__new__')) ?? [];
+  renderAttachments(element('new-selected-files'), files, { client, onRemove: creation ? undefined : index => {
+    files.splice(index, 1); localStorage.setItem(storageKey('attachments', '__new__'), JSON.stringify(files)); saveNewChatDraft();
+  } });
+  const uploading = client ? uploadCount(client, storageKey('attachments', '__new__')) : 0;
+  element('new-manage-files').hidden = !files.length && !uploading;
+  element('new-manage-files').textContent = `附件（${files.length}）${uploading ? ` · ${uploading} 项上传待处理` : ''}`;
+  element('new-parameters-button').textContent = newModel.value ? `${newModel.value} · ${newThinking.value}` : '使用默认设置';
+}
+
+function openContext(isNew = false, picked: () => void = () => {}): void {
+  if (!client || (isNew ? creation : !selected || pending)) return;
+  const pickerClient = client;
+  const chatId = isNew ? '__new__' : selected!.id;
+  const keys = { files: storageKey('attachments', chatId), skills: storageKey('skills', chatId), threads: storageKey('thread-refs', chatId) };
+  const projectId = isNew ? element<HTMLSelectElement>('new-chat-project').value || undefined : undefined;
+  openContextPicker(client, isNew ? { projectId } : { chatId }, selection => {
+    if (selection.kind === 'file') {
+      const files = readStored<FileAttachment[]>(keys.files) ?? [];
+      if (!files.some(file => file.path === selection.value.path)) files.push(selection.value);
+      localStorage.setItem(keys.files, JSON.stringify(files));
+    } else if (selection.kind === 'skill') {
+      const skills = isNew ? newSkills : readStored<Skill[]>(keys.skills) ?? [];
+      if (!skills.some(skill => skill.path === selection.value.path)) skills.push(selection.value);
+      if (isNew) newSkills = skills; else localStorage.setItem(keys.skills, JSON.stringify(skills));
+    } else {
+      const refs = isNew ? newThreads : readStored<ThreadReference[]>(keys.threads) ?? [];
+      if (!refs.some(thread => thread.id === selection.value.id)) refs.push(selection.value);
+      if (isNew) newThreads = refs; else localStorage.setItem(keys.threads, JSON.stringify(refs));
     }
-  }
+    if (client !== pickerClient) return;
+    picked();
+    if (isNew) saveNewChatDraft();
+    else if (selected?.id === chatId) {
+      selectedFiles = readStored<FileAttachment[]>(keys.files) ?? [];
+      selectedSkills = readStored<Skill[]>(keys.skills) ?? [];
+      selectedThreads = readStored<ThreadReference[]>(keys.threads) ?? [];
+      renderChat();
+    }
+  });
 }
 
 function openEdit(): void {
@@ -1385,7 +1716,18 @@ element('new-chat-project').addEventListener('change', () => {
   element<HTMLSelectElement>('new-chat-project').setCustomValidity('');
   saveNewChatDraft();
 });
-element('new-chat-prompt').addEventListener('input', saveNewChatDraft);
+element('new-chat-prompt').addEventListener('input', () => { saveNewChatDraft(); resizeNewInput(); });
+element('new-expand-input').addEventListener('click', () => {
+  const button = element('new-expand-input'); const expanded = button.getAttribute('aria-expanded') !== 'true';
+  button.setAttribute('aria-expanded', String(expanded)); button.textContent = expanded ? '收起' : '展开';
+  resizeNewInput(); element<HTMLTextAreaElement>('new-chat-prompt').focus({ preventScroll: true });
+});
+function resizeNewInput(): void {
+  const input = element<HTMLTextAreaElement>('new-chat-prompt'); input.style.height = 'auto';
+  const limit = element('new-expand-input').getAttribute('aria-expanded') === 'true' ? Math.max(160, (window.visualViewport?.height ?? innerHeight) * .5) : 160;
+  input.style.height = `${Math.min(limit, input.scrollHeight)}px`;
+}
+window.visualViewport?.addEventListener('resize', resizeNewInput);
 newModel.addEventListener('change', () => {
   newModel.setCustomValidity('');
   updateThinking(newModel, newThinking, modelChoices);
@@ -1400,19 +1742,67 @@ element('resolve-create').addEventListener('click', () => {
   saveNewChatDraft();
 });
 element('parameters-button').addEventListener('click', () => void openParameters());
-element('skills-button').addEventListener('click', () => void openSkills());
-element('chat-pin-button').addEventListener('click', () => { if (selected) void togglePin(selected.id); });
-element('files-button').addEventListener('click', () => {
-  if (!client || !selected || pending) return;
-  const id = selected.id;
+element('skills-button').addEventListener('click', () => openContext());
+element('new-context-button').addEventListener('click', () => openContext(true));
+bindMention(messageInput, picked => openContext(false, picked));
+bindMention(element<HTMLTextAreaElement>('new-chat-prompt'), picked => openContext(true, picked));
+element('new-parameters-button').addEventListener('click', () => element<HTMLDialogElement>('new-parameters-dialog').showModal());
+element('chat-menu-button').addEventListener('click', () => {
+  if (selected) openThreadMenu(threads.find(thread => thread.id === selected!.id) ?? { ...selected, projectId: null, updatedAt: 0, pinned: selectedPinned });
+});
+function addFiles(imagesOnly = false): void {
+  if (!client || (addingToNew ? creation : !selected || pending)) return;
+  const isNew = addingToNew;
+  const id = isNew ? '__new__' : selected!.id;
+  const key = storageKey('attachments', id);
   const fileClient = client;
-  openFilePicker(fileClient, selected.cwd, files => {
-    if (client !== fileClient || selected?.id !== id || pending) return;
-    const paths = new Set(selectedFiles.map(file => file.path));
-    selectedFiles.push(...files.filter(file => !paths.has(file.path)));
-    localStorage.setItem(storageKey('attachments', id), JSON.stringify(selectedFiles));
-    renderChat();
-  });
+  const cwd = isNew ? projects.find(project => project.id === element<HTMLSelectElement>('new-chat-project').value)?.path ?? '' : selected!.cwd;
+  openFilePicker(fileClient, cwd, files => {
+    const draft = readStored<FileAttachment[]>(key) ?? [];
+    const paths = new Set(draft.map(file => file.path));
+    draft.push(...files.filter(file => !paths.has(file.path)));
+    localStorage.setItem(key, JSON.stringify(draft));
+    if (client !== fileClient) return;
+    if (isNew) saveNewChatDraft();
+    else if (selected?.id === id) { selectedFiles = draft; renderChat(); }
+  }, imagesOnly, key);
+}
+element('files-button').addEventListener('click', () => { addingToNew = false; element<HTMLDialogElement>('add-content-dialog').showModal(); });
+element('new-files-button').addEventListener('click', () => { addingToNew = true; element<HTMLDialogElement>('add-content-dialog').showModal(); });
+element('add-images').addEventListener('click', () => {
+  element<HTMLDialogElement>('add-content-dialog').close();
+  addFiles(true);
+});
+element('add-files').addEventListener('click', () => {
+  element<HTMLDialogElement>('add-content-dialog').close();
+  addFiles();
+});
+element('new-manage-files').addEventListener('click', () => {
+  const key = storageKey('attachments', '__new__');
+  const files = readStored<FileAttachment[]>(key) ?? [];
+  openAttachmentManager(files, client, creation ? undefined : index => {
+    const latest = (readStored<FileAttachment[]>(key) ?? []).filter(file => file.path !== files[index].path);
+    files.splice(index, 1); localStorage.setItem(key, JSON.stringify(latest)); saveNewChatDraft();
+  }, key);
+});
+element('manage-files').addEventListener('click', () => {
+  if (!selected) return;
+  const id = selected.id;
+  const key = storageKey('attachments', id);
+  const files = selectedFiles;
+  openAttachmentManager(files, client, pending ? undefined : index => {
+    const removedPath = files[index].path;
+    files.splice(index, 1);
+    const latest = (readStored<FileAttachment[]>(key) ?? []).filter(file => file.path !== removedPath);
+    localStorage.setItem(key, JSON.stringify(latest));
+    if (selected?.id === id) { selectedFiles = latest; renderChat(); }
+  }, key);
+});
+window.addEventListener('reach-uploads', () => {
+  if (newDialog.open) { saveNewChatDraft(); renderCreation(); }
+  if (!selected) return;
+  selectedFiles = readStored<FileAttachment[]>(storageKey('attachments', selected.id)) ?? [];
+  renderChat();
 });
 element('open-attachment-chat').addEventListener('click', async () => {
   if (!client || !selected) return;
@@ -1426,30 +1816,6 @@ element('open-attachment-chat').addEventListener('click', async () => {
   } catch (error) { if (token === generation) inform(errorText(error)); }
   finally { if (selected?.id === id) button.disabled = false; }
 });
-element('open-skill-chat').addEventListener('click', async () => {
-  if (!selected || !client || selected.id !== skillsChatId) return;
-  const id = selected.id;
-  const token = generation;
-  const button = element<HTMLButtonElement>('open-skill-chat');
-  button.disabled = true;
-  try {
-    await client.request(`/threads/${encodeURIComponent(id)}/open`, 'POST', {});
-    if (token !== generation || !skillsDialog.open) return;
-    element('skills-status').textContent = '已在电脑端打开，所选 Skill 用于下一次发送。';
-    button.hidden = true;
-    resumeChat();
-  } catch (error) { if (token === generation) showFormError('skills-error', errorText(error)); }
-  finally { button.disabled = false; }
-});
-element('skills-search').addEventListener('input', renderSkillChoices);
-element('skills-form').addEventListener('submit', event => {
-  event.preventDefault();
-  if (!selected || selected.id !== skillsChatId || pending) return;
-  selectedSkills = skillChoices.filter(skill => skillDraft.has(skill.path));
-  localStorage.setItem(storageKey('skills', selected.id), JSON.stringify(selectedSkills));
-  skillsDialog.close();
-  renderChat();
-});
 element('edit-form').addEventListener('submit', event => { event.preventDefault(); void submitEdit(); });
 element('edit-prompt').addEventListener('input', () => {
   if (editing) localStorage.setItem(storageKey('edit-draft', `${editing.chatId}:${editing.turnId}`), element<HTMLTextAreaElement>('edit-prompt').value);
@@ -1460,9 +1826,18 @@ optionsModel.addEventListener('change', () => {
   updateThinking(optionsModel, optionsThinking, modelChoices);
 });
 optionsThinking.addEventListener('change', () => optionsThinking.setCustomValidity(''));
-element('options-form').addEventListener('submit', event => {
+element('options-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (!selected || selected.id !== optionsChatId) return;
+  const id = selected.id;
+  const policy = element<HTMLSelectElement>('approval-policy');
+  if (policy.dataset.original && policy.value !== policy.dataset.original && client) {
+    const button = element<HTMLButtonElement>('save-options'); button.disabled = true;
+    try { await client.request(`/threads/${encodeURIComponent(id)}/approval`, 'POST', { policy: policy.value }); }
+    catch (error) { showFormError('options-error', errorText(error)); return; }
+    finally { button.disabled = false; }
+    if (selected?.id !== id) return;
+  }
   turnOptions = selectedParameters(optionsModel, optionsThinking);
   localStorage.setItem(storageKey('options', selected.id), JSON.stringify(turnOptions));
   optionsDialog.close();
@@ -1475,6 +1850,14 @@ for (const button of document.querySelectorAll<HTMLButtonElement>('[data-close-d
 }
 for (const dialog of [newDialog, optionsDialog]) dialog.addEventListener('close', () => { dialogRequest += 1; });
 element('settings-button').addEventListener('click', openSettings);
+element('notification-settings').addEventListener('click', () => { if (client) openNotificationSettings(client); else inform('连接电脑后可设置任务提醒'); });
+document.addEventListener('click', event => {
+  if (event.defaultPrevented || !(event.target instanceof Element)) return;
+  const link = event.target.closest<HTMLAnchorElement>('a[href]');
+  if (!link || link.dataset.systemBrowser !== undefined || !/^https?:/i.test(link.getAttribute('href') ?? '')) return;
+  event.preventDefault();
+  void openReader(link.href, client, selected?.cwd).catch(error => inform(errorText(error)));
+});
 element('chat-settings-button').addEventListener('click', openSettings);
 element('cancel-settings').addEventListener('click', closeSettings);
 element('back-button').addEventListener('click', backToInbox);
@@ -1492,6 +1875,14 @@ element('retry-history').addEventListener('click', () => {
 projectFilter.addEventListener('change', renderInbox);
 searchInput.addEventListener('input', renderInbox);
 refreshButton.addEventListener('click', () => void refreshInbox());
+let refreshGesture: number | null = null;
+element('inbox-view').addEventListener('touchstart', event => {
+  refreshGesture = element('inbox-view').scrollTop <= 0 ? event.touches[0].clientY : null;
+}, { passive: true });
+element('inbox-view').addEventListener('touchend', event => {
+  if (refreshGesture !== null && event.changedTouches[0].clientY - refreshGesture > 80 && !refreshButton.disabled) void refreshInbox();
+  refreshGesture = null;
+}, { passive: true });
 element('more-threads').addEventListener('click', async () => {
   if (!client || !nextThreads || moreLoading) return;
   const token = generation;
@@ -1499,7 +1890,7 @@ element('more-threads').addEventListener('click', async () => {
   moreLoading = true;
   button.disabled = true;
   try {
-    const page = await client.request<{ threads: Thread[]; nextCursor: string | null }>(`/threads?cursor=${encodeURIComponent(nextThreads)}`);
+    const page = await client.request<{ threads: Thread[]; nextCursor: string | null }>(`/threads?archived=${archivedList}&cursor=${encodeURIComponent(nextThreads)}`);
     if (token !== generation) return;
     const existing = new Set(threads.map(thread => thread.id));
     threads.push(...page.threads.filter(thread => !existing.has(thread.id)).map(thread => ({ ...thread, pinned: Boolean(thread.pinned) })));
@@ -1508,8 +1899,8 @@ element('more-threads').addEventListener('click', async () => {
   } catch (error) { if (token === generation) inform(errorText(error)); }
   finally { if (token === generation) { moreLoading = false; button.disabled = !connected; } }
 });
-olderButton.addEventListener('click', async () => {
-  if (!client || !selected?.nextCursor || olderLoading || syncing) return;
+async function loadOlderHistory(): Promise<void> {
+  if (!client || !selected?.nextCursor || olderLoading || !historyLoaded) return;
   const token = generation;
   const oldHeight = scroll.scrollHeight;
   const oldTop = scroll.scrollTop;
@@ -1522,16 +1913,80 @@ olderButton.addEventListener('click', async () => {
     historyError = '';
     renderChat();
     scroll.scrollTop = oldTop + scroll.scrollHeight - oldHeight;
+    scheduleCache();
   } catch (error) { await reportReadError(error, token, 'history'); }
   finally { if (token === generation) { olderLoading = false; renderChat(); } }
-});
+}
+olderButton.addEventListener('click', () => void loadOlderHistory());
+
+function openChatSearch(): void {
+  if (!selected) return;
+  const chatId = selected.id;
+  const menu = menuDialog('在对话中查找');
+  const input = document.createElement('input'); input.type = 'search'; input.placeholder = '搜索已加载的消息'; input.setAttribute('aria-label', '查找消息');
+  const scope = document.createElement('p'); scope.className = 'field-note';
+  const results = document.createElement('div');
+  const more = document.createElement('button'); more.className = 'quiet'; more.type = 'button'; more.textContent = '继续读取更早消息';
+  menu.body.append(input, scope, results, more);
+  function search(): void {
+    if (selected?.id !== chatId) { menu.dialog.close(); return; }
+    results.replaceChildren();
+    const query = input.value.trim().toLocaleLowerCase();
+    let total = 0; let matches = 0;
+    for (const turn of selected.turns) for (const message of turn.messages) {
+      total++;
+      const text = [message.text, ...(message.responseAnnotations ?? []).flatMap(item => [item.text, item.annotation])].join('\n');
+      const position = text.toLocaleLowerCase().indexOf(query);
+      if (!query || position < 0) continue;
+      matches++;
+      const result = document.createElement('button'); result.type = 'button'; result.className = 'quiet search-result';
+      result.textContent = `${message.kind === 'user' ? '用户' : message.kind === 'assistant' ? '助手' : '执行过程'} · ${turn.id}\n${text.slice(Math.max(0, position - 35), position + query.length + 100)}`;
+      result.addEventListener('click', () => {
+        menu.dialog.close();
+        const target = renderedMessages.get(`${turn.id}:${message.id}`);
+        if (!target) { inform('来源消息已更新，请重新查找'); return; }
+        let ancestor: HTMLElement | null = target;
+        while (ancestor) { if (ancestor instanceof HTMLDetailsElement) ancestor.open = true; ancestor = ancestor.parentElement; }
+        target.scrollIntoView({ block: 'center' }); target.classList.add('search-highlight');
+        setTimeout(() => target.classList.remove('search-highlight'), 3000);
+      });
+      results.append(result);
+    }
+    scope.textContent = `已加载 ${selected.turns.length} 轮、${total} 条记录${query ? `，匹配 ${matches} 条` : ''}${selected.hasMore ? '，更早内容尚未搜索' : ''}`;
+    more.hidden = !selected.hasMore;
+  }
+  input.addEventListener('input', search);
+  more.addEventListener('click', async () => {
+    more.disabled = true; scope.textContent = '正在读取更早内容…';
+    await loadOlderHistory();
+    if (menu.dialog.open) { search(); more.disabled = false; if (historyError) menu.error.textContent = historyError; }
+  });
+  search(); input.focus();
+}
 element('message-form').addEventListener('submit', event => { event.preventDefault(); void sendMessage(); });
+element('expand-input').addEventListener('click', () => {
+  const expanded = element('message-form').classList.toggle('expanded');
+  element('expand-input').textContent = expanded ? '收起' : '展开';
+  element('expand-input').setAttribute('aria-expanded', String(expanded));
+  resizeInput();
+  messageInput.focus({ preventScroll: true });
+});
+function resizeInput(): void {
+  messageInput.style.height = 'auto';
+  const limit = element('message-form').classList.contains('expanded') ? Math.max(160, (window.visualViewport?.height ?? innerHeight) * .5) : 160;
+  messageInput.style.height = `${Math.min(limit, messageInput.scrollHeight)}px`;
+}
+window.visualViewport?.addEventListener('resize', resizeInput);
+scroll.addEventListener('scroll', updateReadingActions, { passive: true });
+new ResizeObserver(updateReadingActions).observe(element('messages'));
+element('jump-latest').addEventListener('click', () => { scroll.scrollTop = scroll.scrollHeight; updateReadingActions(); });
+element('jump-requests').addEventListener('click', () => element('requests').scrollIntoView({ block: 'start' }));
 messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
-  messageInput.style.height = 'auto';
-  messageInput.style.height = `${Math.min(160, messageInput.scrollHeight)}px`;
+  resizeInput();
   sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-    || (!messageInput.value.trim() && !selectedFiles.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
+    || (!messageInput.value.trim() && !selectedFiles.length && !selectedSkills.length && !selectedThreads.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null)
+    || Boolean(client && selected && uploadCount(client, storageKey('attachments', selected.id)));
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));
@@ -1561,13 +2016,47 @@ if (Capacitor.getPlatform() === 'android') {
 }
 
 await cache.open().catch(error => inform(`本地缓存不可用。${errorText(error)}`));
+async function openNotification(event: TaskEvent): Promise<void> {
+  if (event.serverId && event.serverId !== connection?.serverId) { inform('这条提醒来自另一台电脑，请先连接对应服务'); return; }
+  notificationTarget = event;
+  for (const dialog of document.querySelectorAll<HTMLDialogElement>('dialog[open]')) dialog.close();
+  await openChat(event.threadId);
+  while (notificationTarget && selected?.id === event.threadId && !selected.turns.some(turn => turn.id === event.turnId) && selected.hasMore && !historyError) {
+    const cursor = selected.nextCursor;
+    await loadOlderHistory();
+    if (cursor === selected.nextCursor) break;
+  }
+  updateReadingActions();
+}
+async function refreshDesktopLocale(): Promise<void> {
+  const current = client;
+  if (!current || !connection) return;
+  try {
+    const status = await current.request<{ serverId: string; desktopLocale?: string | null }>('/status');
+    if (client !== current || status.serverId !== connection.serverId) return;
+    connection.desktopLocale = status.desktopLocale;
+    localStorage.setItem('codex-reach-connection', JSON.stringify(connection));
+    if (selected) renderChat();
+  } catch { /* Cached reading remains available while connection recovery runs. */ }
+}
+await initializeNotifications(event => {
+  notificationTarget = event;
+  if (applicationReady) void openNotification(event);
+}).catch(error => inform(`提醒入口不可用。${errorText(error)}`));
+applicationReady = true;
 connectButton.disabled = false;
 urlInput.value = connection?.url ?? '';
 keyInput.value = connection?.key ?? '';
 showView('connection');
 if (connection) {
+  void refreshDesktopLocale();
+  if (client) void recoverUploads(client);
+  if (client) void connectNotifications(client).catch(error => inform(`提醒连接未启动。${errorText(error)}`));
   const lastChat = localStorage.getItem(storageKey('last-chat'));
-  if (lastChat) {
+  if (notificationTarget) {
+    await openNotification(notificationTarget);
+    void loadInbox(generation).catch(() => {});
+  } else if (lastChat) {
     await openChat(lastChat);
     void loadInbox(generation).catch(() => {});
   } else {

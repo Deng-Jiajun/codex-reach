@@ -125,6 +125,22 @@ jobs:
             grep -q "OK (1 test)" "artifacts/instrumentation-$stage.txt";
             adb pull "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png" artifacts/;
             done;
+            for stage in reader notifications notifications-persist; do
+            adb shell am force-stop io.github.dengjiajun.codexreach.verification;
+            if [[ "$stage" == notifications-persist ]]; then
+            curl --fail --silent --request POST --header "Content-Type: application/json"
+            --data "{\"id\":\"mobile-after-stop\",\"kind\":\"failed\"}"
+            http://127.0.0.1:4320/control/mobile-event > artifacts/notification-after-stop.json;
+            adb shell dumpsys activity services io.github.dengjiajun.codexreach.verification > artifacts/notification-stopped-services.txt;
+            fi;
+            adb shell am instrument -w -r -e class io.github.dengjiajun.codexreach.MobileUpgradeTest
+            -e stage "$stage" io.github.dengjiajun.codexreach.verification.test/androidx.test.runner.AndroidJUnitRunner
+            | tee "artifacts/instrumentation-$stage.txt";
+            grep -q "OK (1 test)" "artifacts/instrumentation-$stage.txt";
+            adb pull "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png" artifacts/;
+            done;
+            adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-html.png artifacts/;
+            adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-pdf.png artifacts/;
             curl --fail --silent http://127.0.0.1:4320/control/organization-stats > artifacts/organization-stats.json
             '
       - name: Upload APK and verification results

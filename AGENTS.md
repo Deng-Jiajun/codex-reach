@@ -12,6 +12,8 @@ Codex Reach 通过 Tailscale 为 Windows 上的现有 Codex App 提供 Android �
 
 新确认的需求更新产品规格，改变原方案时补充决策记录。临时排查材料和测试产物放在已忽略的 `artifacts/` 中。当前用户指令优先于文档中的旧记录。
 
+手机端布局、手势、输入、附件或阅读交互任务读取项目内的 [codex-reach-mobile-ux](.agents/skills/codex-reach-mobile-ux/SKILL.md)。该 skill 提供设计与验证方法，功能规则以产品规格为准。
+
 ## 实现入口
 
 | 目录或文件 | 职责 |

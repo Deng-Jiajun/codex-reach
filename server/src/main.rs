@@ -1,8 +1,14 @@
 mod app_server;
+mod context;
 mod desktop;
+mod events;
 mod files;
 mod model;
+mod organization;
 mod outbox;
+mod queue;
+mod reader;
+mod uploads;
 
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
@@ -44,8 +50,13 @@ struct AppState {
     app_server: app_server::AppServerClient,
     ipc: Mutex<Option<Arc<Ipc>>>,
     outbox: Outbox,
+    queue: queue::Queue,
+    events: events::Events,
     send_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     upload_directory: PathBuf,
+    context_directory: PathBuf,
+    uploads: Arc<uploads::Uploads>,
+    reader: Arc<reader::Reader>,
 }
 
 impl AppState {
@@ -60,23 +71,7 @@ impl AppState {
         let cwd = metadata["thread"]["cwd"]
             .as_str()
             .context("会话缺少工作目录")?;
-        let result = self
-            .app_server
-            .call("skills/list", json!({"cwds":[cwd],"forceReload":false}))
-            .await?;
-        let entries = result["data"].as_array().context("Skill 列表格式无效")?;
-        let skills = entries
-            .iter()
-            .flat_map(|entry| entry["skills"].as_array().into_iter().flatten())
-            .filter(|skill| skill["enabled"] == true)
-            .cloned()
-            .collect::<Vec<_>>();
-        let errors = entries
-            .iter()
-            .flat_map(|entry| entry["errors"].as_array().into_iter().flatten())
-            .cloned()
-            .collect::<Vec<_>>();
-        Ok(json!({"skills":skills,"errors":errors}))
+        context::catalog(self, Some(cwd)).await
     }
 
     async fn ipc(&self) -> Result<Arc<Ipc>> {
@@ -98,6 +93,7 @@ impl AppState {
         prompt: &str,
         request_id: &str,
         options: &model::TurnOptions,
+        next_turn_only: bool,
     ) -> Result<Value> {
         let gate = self
             .send_locks
@@ -108,49 +104,101 @@ impl AppState {
             .clone();
         let _guard = gate.lock().await;
         if !options.skills.is_empty() {
-            let catalog = self.skill_catalog(chat_id).await?;
+            let catalog = self
+                .skill_catalog(chat_id)
+                .await
+                .map_err(|error| NotDispatched(error.to_string()))?;
             for selected in &options.skills {
-                ensure!(
-                    catalog["skills"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .any(|skill| skill["name"] == selected.name
-                            && skill["path"] == selected.path),
-                    "所选 Skill 已不可用，请刷新 Skill 列表"
-                );
+                if !catalog["skills"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|skill| skill["name"] == selected.name && skill["path"] == selected.path)
+                {
+                    return Err(
+                        NotDispatched("所选 Skill 已不可用，请刷新 Skill 列表".to_owned()).into(),
+                    );
+                }
             }
         }
-        if let Ok(client) = self.ipc().await
-            && let Ok(view) = client.live(chat_id, None).await
-            && view["available"] == true
-            && let Some(owner) = client.follow(chat_id).await?
-        {
-            client
-                .send(
-                    chat_id,
-                    &owner,
-                    prompt,
-                    request_id,
-                    &serde_json::to_value(options)?,
-                )
-                .await?;
-            return Ok(Value::Null);
+        let options = context::resolve(self, request_id, options)
+            .await
+            .map_err(|error| NotDispatched(error.to_string()))?;
+        if let Ok(client) = self.ipc().await {
+            for attempt in 0..2 {
+                if client.follow(chat_id).await?.is_none() {
+                    self.tools
+                        .call("navigate_to_codex_page", json!({"threadId":chat_id}))
+                        .await?;
+                    for _ in 0..20 {
+                        if client.follow(chat_id).await?.is_some() {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+                if let Some(owner) = client.follow(chat_id).await? {
+                    client.live(chat_id, None).await?;
+                    let result = client
+                        .send(
+                            chat_id,
+                            &owner,
+                            prompt,
+                            request_id,
+                            &serde_json::to_value(&options)?,
+                            next_turn_only,
+                        )
+                        .await;
+                    if result
+                        .as_ref()
+                        .is_err_and(|error| error.to_string() == "no-client-found")
+                        && attempt == 0
+                    {
+                        continue;
+                    }
+                    result?;
+                    return Ok(Value::Null);
+                }
+                break;
+            }
         }
         ensure!(
-            options.skills.is_empty() && options.attachments.is_empty(),
-            "会话尚未载入桌面，所选 Skill 或附件未投递。请先在电脑端打开此对话后再发送"
+            !next_turn_only && options.skills.is_empty() && options.attachments.is_empty(),
+            "桌面尚未载入此对话，请稍后查询投递结果"
         );
-        let mut arguments = serde_json::to_value(options)?;
-        arguments["threadId"] = json!(chat_id);
-        arguments["hostId"] = json!("local");
-        arguments["prompt"] = json!(prompt);
+        let mut arguments = json!({"threadId":chat_id,"hostId":"local","prompt":prompt});
+        if let Some(model) = options.model {
+            arguments["model"] = json!(model);
+        }
+        if let Some(thinking) = options.thinking {
+            arguments["thinking"] = json!(thinking);
+        }
         self.tools.call("send_message_to_thread", arguments).await?;
         Ok(Value::Null)
     }
 }
 
 struct ApiError(StatusCode, String);
+
+#[derive(Debug)]
+struct NotDispatched(String);
+impl std::fmt::Display for NotDispatched {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for NotDispatched {}
+
+fn validate_message(prompt: &str, options: &model::TurnOptions) -> Result<()> {
+    ensure!(
+        !prompt.trim().is_empty()
+            || !options.attachments.is_empty()
+            || !options.skills.is_empty()
+            || !options.thread_refs.is_empty(),
+        "请填写消息或选择引用"
+    );
+    Ok(())
+}
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
@@ -193,8 +241,12 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiEr
             json!({"mode":"history","source":"codex","hostId":"local","limit":1}),
         )
         .await?;
+    let configuration = state
+        .app_server
+        .call("config/read", json!({"includeLayers":false}))
+        .await?;
     Ok(Json(
-        json!({"serverId":state.config.server_id,"version":env!("CARGO_PKG_VERSION"),"desktopConnected":true}),
+        json!({"serverId":state.config.server_id,"version":env!("CARGO_PKG_VERSION"),"desktopConnected":true,"desktopLocale":configuration["config"]["desktop"]["localeOverride"]}),
     ))
 }
 
@@ -261,6 +313,55 @@ async fn skills(
     Ok(Json(catalog))
 }
 
+async fn approval_settings(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let view = state.ipc().await?.live(&id, None).await?;
+    let requirements = state
+        .app_server
+        .call("configRequirements/read", json!({}))
+        .await?;
+    Ok(Json(
+        json!({"available":view["available"] == true && !view["approvalPolicy"].is_null(),
+        "approvalPolicy":view["approvalPolicy"],"allowed":requirements["requirements"]["allowedApprovalPolicies"]}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ApprovalPolicyRequest {
+    policy: String,
+}
+
+async fn set_approval(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<ApprovalPolicyRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if !matches!(input.policy.as_str(), "untrusted" | "on-request" | "never") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "审批策略无效".to_owned()));
+    }
+    let requirements = state
+        .app_server
+        .call("configRequirements/read", json!({}))
+        .await?;
+    if let Some(allowed) = requirements["requirements"]["allowedApprovalPolicies"].as_array() {
+        if !allowed.iter().any(|value| value == &input.policy) {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "当前配置不允许选择该审批策略".to_owned(),
+            ));
+        }
+    }
+    Ok(Json(
+        state
+            .ipc()
+            .await?
+            .update_approval(&id, &input.policy)
+            .await?,
+    ))
+}
+
 async fn open_thread(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -286,16 +387,15 @@ async fn create_thread(
     State(state): State<Arc<AppState>>,
     Json(input): Json<CreateRequest>,
 ) -> Result<(StatusCode, Json<Receipt>), ApiError> {
-    if input.prompt.trim().is_empty() || Uuid::parse_str(&input.request_id).is_err() {
+    if (input.prompt.trim().is_empty()
+        && input.options.attachments.is_empty()
+        && input.options.thread_refs.is_empty()
+        && input.options.skills.is_empty())
+        || Uuid::parse_str(&input.request_id).is_err()
+    {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "首条消息和有效的请求标识为必填项".to_owned(),
-        ));
-    }
-    if !input.options.skills.is_empty() || !input.options.attachments.is_empty() {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "请先创建对话，再为后续消息选择 Skill 和附件".to_owned(),
         ));
     }
     let mut options = serde_json::to_value(&input.options).map_err(anyhow::Error::from)?;
@@ -307,22 +407,29 @@ async fn create_thread(
     if fresh {
         tokio::spawn(async move {
             let result = async {
+                let cwd = match &input.project_id {
+                    Some(id) => Some(context::project_path(&state, id).await?),
+                    None => None,
+                };
+                context::validate_skills(&state, cwd.as_deref(), &input.options).await?;
+                let resolved = context::resolve(&state, &input.request_id, &input.options).await?;
                 let target = if let Some(project_id) = input.project_id {
-                    let projects = state.tools.call("list_projects", json!({})).await?;
-                    ensure!(
-                        projects["projects"].as_array().into_iter().flatten().any(
-                            |project| project["projectId"] == project_id
-                                && project["projectKind"] == "local"
-                                && project["hostId"] == "local"
-                        ),
-                        "所选本机项目已不可用，请刷新项目列表"
-                    );
                     json!({"type":"project","projectId":project_id,"environment":{"type":"local"}})
                 } else {
                     json!({"type":"projectless"})
                 };
-                let mut arguments = serde_json::to_value(&input.options)?;
-                arguments["prompt"] = json!(input.prompt);
+                let mut arguments = json!({});
+                if let Some(model) = &input.options.model {
+                    arguments["model"] = json!(model);
+                }
+                if let Some(thinking) = &input.options.thinking {
+                    arguments["thinking"] = json!(thinking);
+                }
+                arguments["prompt"] = json!(context::first_prompt(
+                    &input.prompt,
+                    &input.request_id,
+                    &resolved
+                ));
                 arguments["target"] = target;
                 let result = state.tools.call("create_thread", arguments).await?;
                 ensure!(
@@ -482,6 +589,79 @@ async fn edit(
 #[derive(Deserialize)]
 struct PageQuery {
     cursor: Option<String>,
+    #[serde(default)]
+    archived: bool,
+}
+
+#[derive(Deserialize)]
+struct TitleRequest {
+    title: String,
+}
+
+async fn rename_thread(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<TitleRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if input.title.trim().is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "对话名称不能为空".to_owned(),
+        ));
+    }
+    Ok(Json(
+        state
+            .tools
+            .call(
+                "set_thread_title",
+                json!({"source":"codex","threadId":id,"title":input.title.trim()}),
+            )
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct ArchiveRequest {
+    archived: bool,
+}
+
+async fn archive_thread(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<ArchiveRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let result = state
+        .tools
+        .call(
+            "set_thread_archived",
+            json!({"source":"codex","hostId":"local","threadId":id,"archived":input.archived}),
+        )
+        .await?;
+    if let Ok(client) = state.ipc().await {
+        client.forget(&id).await;
+    }
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+struct ReadRequest {
+    read: bool,
+}
+
+async fn mark_thread_read(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<ReadRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        state
+            .tools
+            .call(
+                "set_thread_read_state",
+                json!({"source":"codex","hostId":"local","threadId":id,"read":input.read}),
+            )
+            .await?,
+    ))
 }
 
 async fn pinned_threads(state: &AppState) -> Result<Vec<Value>> {
@@ -555,6 +735,79 @@ struct UploadRequest {
     data: String,
 }
 
+async fn start_upload(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<uploads::Start>,
+) -> Result<Json<uploads::Receipt>, ApiError> {
+    let uploads = Arc::clone(&state.uploads);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || uploads.start(input))
+            .await
+            .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn open_document(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<reader::Open>,
+) -> Result<Json<reader::Document>, ApiError> {
+    let reader = Arc::clone(&state.reader);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || reader.open(input))
+            .await
+            .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn read_document(
+    State(state): State<Arc<AppState>>,
+    Path((id, resource)): Path<(String, String)>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let reader = Arc::clone(&state.reader);
+    let path = tokio::task::spawn_blocking(move || reader.resolve(&id, &resource))
+        .await
+        .map_err(anyhow::Error::from)??;
+    Ok(reader::serve(path, request).await?)
+}
+
+async fn upload_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<uploads::Receipt>, ApiError> {
+    let uploads = Arc::clone(&state.uploads);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || uploads.status(&id))
+            .await
+            .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn upload_chunk(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(input): Json<uploads::Chunk>,
+) -> Result<Json<uploads::Receipt>, ApiError> {
+    let uploads = Arc::clone(&state.uploads);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || uploads.write(&id, input))
+            .await
+            .map_err(anyhow::Error::from)??,
+    ))
+}
+
+async fn finish_upload(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<uploads::Receipt>, ApiError> {
+    let uploads = Arc::clone(&state.uploads);
+    Ok(Json(
+        tokio::task::spawn_blocking(move || uploads.finish(&id))
+            .await
+            .map_err(anyhow::Error::from)??,
+    ))
+}
+
 async fn upload_file(
     State(state): State<Arc<AppState>>,
     Json(input): Json<UploadRequest>,
@@ -595,17 +848,23 @@ async fn threads(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PageQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut arguments =
-        json!({"mode":"history","source":"codex","hostId":"local","limit":50,"archived":false});
+    let mut arguments = json!({"mode":"history","source":"codex","hostId":"local","limit":50,"archived":query.archived});
     if let Some(cursor) = &query.cursor {
         arguments["cursor"] = json!(cursor);
     }
     let result = state.tools.call("list_threads", arguments).await?;
-    let pinned = if query.cursor.is_none() {
-        pinned_threads(&state).await?
+    let recent = if query.cursor.is_none() && !query.archived {
+        state
+            .tools
+            .call("list_threads", json!({"mode":"recent","limit":50}))
+            .await?
     } else {
-        Vec::new()
+        json!({})
     };
+    let pinned = recent["pinnedThreads"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let pinned_ids = pinned
         .iter()
         .filter_map(|thread| thread["id"].as_str())
@@ -613,9 +872,13 @@ async fn threads(
     let threads = pinned.iter().chain(result["threads"].as_array().into_iter().flatten()
         .filter(|thread| !pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())))
         .filter(|thread| thread["kind"] == "codex" && thread["hostId"] == "local")
-        .map(|thread| json!({"id":thread["id"],"title":model::text(thread, "title"),"projectId":thread["projectId"],
-            "cwd":thread["cwd"],"status":model::status(&thread["status"]),"updatedAt":model::timestamp_seconds(&thread["updatedAt"]),
-            "pinned":pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())})).collect::<Vec<_>>();
+        .map(|thread| {
+            let current = recent["threads"].as_array().into_iter().flatten().chain(pinned.iter()).find(|item| item["id"] == thread["id"]);
+            json!({"id":thread["id"],"title":model::text(thread, "title"),"projectId":thread["projectId"],
+                "cwd":thread["cwd"],"status":model::status(&current.unwrap_or(thread)["status"]),"updatedAt":model::timestamp_seconds(&thread["updatedAt"]),
+                "isUnread":current.and_then(|item| item["isUnread"].as_bool()).or_else(|| thread["isUnread"].as_bool()),
+                "pinned":pinned_ids.contains(&thread["id"].as_str().unwrap_or_default())})
+        }).collect::<Vec<_>>();
     Ok(Json(
         json!({"threads":threads,"nextCursor":result["nextCursor"]}),
     ))
@@ -662,7 +925,10 @@ async fn send(
     Path(id): Path<String>,
     Json(input): Json<SendRequest>,
 ) -> Result<(StatusCode, Json<Receipt>), ApiError> {
-    if (input.prompt.trim().is_empty() && input.options.attachments.is_empty())
+    if (input.prompt.trim().is_empty()
+        && input.options.attachments.is_empty()
+        && input.options.skills.is_empty()
+        && input.options.thread_refs.is_empty())
         || Uuid::parse_str(&input.request_id).is_err()
     {
         return Err(ApiError(
@@ -683,7 +949,7 @@ async fn send(
     if fresh {
         tokio::spawn(async move {
             let result = state
-                .dispatch(&id, &input.prompt, &input.request_id, &input.options)
+                .dispatch(&id, &input.prompt, &input.request_id, &input.options, false)
                 .await;
             if state.outbox.finish(&input.request_id, result).is_err() {
                 eprintln!("无法保存投递结果，请检查本地发送数据库");
@@ -799,10 +1065,19 @@ async fn main() -> Result<()> {
         ipc: Mutex::new(None),
         app_server: app_server::AppServerClient::default(),
         outbox: Outbox::open(&directory.join("outbox.db"))?,
+        queue: queue::Queue::open(&directory.join("queue.db"))?,
+        events: events::Events::open(&directory.join("events.db"))?,
         send_locks: Mutex::new(HashMap::new()),
         upload_directory: std::path::absolute(directory.join("uploads"))?,
+        context_directory: std::path::absolute(directory.join("contexts"))?,
+        uploads: Arc::new(uploads::Uploads::open(&std::path::absolute(
+            directory.join("uploads"),
+        )?)?),
+        reader: Arc::new(reader::Reader::default()),
         config,
     });
+    let queue_worker = tokio::spawn(queue::run(Arc::clone(&state)));
+    let event_worker = tokio::spawn(events::run(Arc::clone(&state)));
     let cors = CorsLayer::new()
         .allow_origin(
             [
@@ -818,9 +1093,16 @@ async fn main() -> Result<()> {
         .route("/status", get(status))
         .route("/projects", get(projects))
         .route("/models", get(models))
+        .route("/events", get(events::list))
+        .route("/context", get(context::choices))
         .route("/files", get(browse_files))
         .route("/files/resolve", post(resolve_files))
         .route("/files/preview", post(preview_file))
+        .route("/files/read", post(open_document))
+        .route("/uploads", post(start_upload))
+        .route("/uploads/{id}", get(upload_status))
+        .route("/uploads/{id}/chunk", post(upload_chunk))
+        .route("/uploads/{id}/finish", post(finish_upload))
         .route(
             "/files/upload",
             post(upload_file).layer(DefaultBodyLimit::max(28_010_000)),
@@ -828,14 +1110,30 @@ async fn main() -> Result<()> {
         .route("/threads", get(threads).post(create_thread))
         .route("/threads/{id}/history", get(history))
         .route("/threads/{id}/settings", get(thread_settings))
+        .route(
+            "/threads/{id}/approval",
+            get(approval_settings).post(set_approval),
+        )
         .route("/threads/{id}/skills", get(skills))
         .route("/threads/{id}/open", post(open_thread))
         .route("/threads/{id}/pin", get(pin_state).post(pin_thread))
+        .route("/threads/{id}/title", post(rename_thread))
+        .route("/threads/{id}/archive", post(archive_thread))
+        .route("/threads/{id}/read", post(mark_thread_read))
+        .route("/threads/{id}/state", get(organization::summary))
+        .route("/threads/{id}/changes", get(organization::changes))
+        .route(
+            "/threads/{id}/delete-preview",
+            get(organization::deletion_preview),
+        )
+        .route("/threads/{id}/delete", post(organization::delete))
         .route("/threads/{id}/stop", post(stop_thread))
         .route("/threads/{id}/respond", post(respond))
         .route("/threads/{id}/edit", post(edit))
         .route("/threads/{id}/live", get(live))
         .route("/threads/{id}/messages", post(send))
+        .route("/threads/{id}/queue", get(queue::list).post(queue::add))
+        .route("/threads/{id}/queue/{request_id}", post(queue::change))
         .route("/requests/{id}", get(receipt))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -844,6 +1142,23 @@ async fn main() -> Result<()> {
         .layer(cors);
     let router = Router::new()
         .nest("/api", api)
+        .route(
+            "/reader/{id}/{*resource}",
+            get(read_document).layer(
+                tower_http::compression::CompressionLayer::new()
+                    .gzip(true)
+                    .compress_when(
+                        |_: StatusCode,
+                         _: axum::http::Version,
+                         _: &HeaderMap,
+                         extensions: &axum::http::Extensions| {
+                            extensions
+                                .get::<reader::Compressible>()
+                                .is_some_and(|value| value.0)
+                        },
+                    ),
+            ),
+        )
         .route("/setup", get(setup))
         .fallback_service(ServeDir::new(web_directory))
         .with_state(state);
@@ -859,5 +1174,7 @@ async fn main() -> Result<()> {
         _ = tokio::signal::ctrl_c() => {},
         result = servers.join_next() => { result.context("HTTP 服务已退出")??.context("HTTP 服务异常")?; }
     }
+    queue_worker.abort();
+    event_worker.abort();
     Ok(())
 }

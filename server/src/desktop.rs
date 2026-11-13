@@ -267,6 +267,16 @@ impl Ipc {
         }
         .await;
         self.pending.lock().await.remove(&id);
+        if result
+            .as_ref()
+            .is_err_and(|error| error.to_string() == "no-client-found")
+            && let Some(owner) = owner
+        {
+            self.subscriptions
+                .lock()
+                .await
+                .retain(|_, entry| entry.owner != owner);
+        }
         result
     }
 
@@ -317,6 +327,16 @@ impl Ipc {
             .send(self.follow_frame(id, &owner, true).await)
             .await?;
         Ok(Some(owner))
+    }
+
+    pub async fn forget(&self, id: &str) {
+        let entry = self.subscriptions.lock().await.remove(id);
+        if let Some(entry) = entry {
+            let _ = self
+                .outbound
+                .send(self.follow_frame(id, &entry.owner, false).await)
+                .await;
+        }
     }
 
     pub async fn live(&self, id: &str, after: Option<&str>) -> Result<Value> {
@@ -376,6 +396,22 @@ impl Ipc {
             .get("settings")
             .context("缺少会话模型设置")?;
         Ok((!settings.is_null()).then(|| settings.clone()))
+    }
+
+    pub async fn update_approval(&self, id: &str, policy: &str) -> Result<Value> {
+        let owner = self.follow(id).await?.context("请先在桌面加载该对话")?;
+        let response = self
+            .request(
+                "thread-follower-update-thread-settings",
+                json!({
+                    "conversationId":id,"threadSettings":{"approvalPolicy":policy}
+                }),
+                Some(&owner),
+                2,
+            )
+            .await?;
+        ensure!(response["result"]["applied"] == true, "审批策略未应用");
+        Ok(json!({"approvalPolicy":policy,"scope":"nextTurn"}))
     }
 
     pub async fn interrupt(&self, id: &str, expected_turn_id: &str) -> Result<Value> {
@@ -459,6 +495,7 @@ impl Ipc {
         prompt: &str,
         request_id: &str,
         options: &Value,
+        next_turn_only: bool,
     ) -> Result<()> {
         let (active, cwd) = {
             let subscriptions = self.subscriptions.lock().await;
@@ -474,6 +511,9 @@ impl Ipc {
                     .to_owned(),
             )
         };
+        if active && next_turn_only {
+            return Err(TurnActive.into());
+        }
         let paths = options["attachments"]
             .as_array()
             .into_iter()
@@ -536,7 +576,16 @@ impl Ipc {
     }
 }
 
-fn prepare_message(
+#[derive(Debug)]
+pub struct TurnActive;
+impl std::fmt::Display for TurnActive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("当前轮次仍在运行")
+    }
+}
+impl std::error::Error for TurnActive {}
+
+pub(crate) fn prepare_message(
     prompt: &str,
     request_id: &str,
     files: &[crate::files::FileAttachment],

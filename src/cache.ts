@@ -4,6 +4,23 @@ import type { HistoryPage, Message, Turn } from './types';
 
 export class ChatCache {
   private database?: SQLiteDBConnection;
+  private writeOperation: Promise<void> = Promise.resolve();
+
+  private write(entries: { statement: string; values: unknown[] }[]): Promise<void> {
+    const operation = this.writeOperation.catch(() => {}).then(async () => {
+      if (this.database && entries.length) await this.database.executeSet(entries, true);
+    });
+    this.writeOperation = operation;
+    return operation;
+  }
+
+  async remove(serverId: string, chatIds: string[]): Promise<void> {
+    if (!this.database) return;
+    const entries = chatIds.flatMap(chatId => ['cached_messages', 'cached_turns', 'cached_chats'].map(table => ({
+      statement: `DELETE FROM ${table} WHERE server_id=? AND chat_id=?`, values: [serverId, chatId],
+    })));
+    await this.write(entries);
+  }
 
   async open(): Promise<void> {
     if (Capacitor.getPlatform() !== 'android') return;
@@ -72,9 +89,9 @@ export class ChatCache {
         statement: `INSERT INTO cached_messages
           (server_id, chat_id, turn_id, item_id, position, kind, text, phase, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         values: [...key, turn.id, message.id, itemPosition, message.kind, message.text, message.phase,
-          JSON.stringify({ questions: message.questions, questionReplies: message.questionReplies, attachments: message.attachments, responseAnnotations: message.responseAnnotations })],
+          JSON.stringify({ questions: message.questions, questionReplies: message.questionReplies, attachments: message.attachments, responseAnnotations: message.responseAnnotations, requestAnnotations: message.requestAnnotations })],
       }));
     });
-    await this.database.executeSet(entries, true);
+    await this.write(entries);
   }
 }

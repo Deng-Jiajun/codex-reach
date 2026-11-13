@@ -19,6 +19,7 @@
         </div>
       </header>
       <p id="notice" role="status" aria-live="polite" hidden></p>
+      <div id="task-notices" class="task-notices" aria-live="polite" hidden></div>
       <div id="reconnect-notice" role="status" aria-live="polite" hidden>
         <span id="reconnect-text"></span>
         <button id="reconnect-button" class="quiet" type="button">立即重连</button>
@@ -35,12 +36,14 @@
           </form>
           <p class="connection-help">在电脑上打开服务的 /setup 页面，可查看连接信息。</p>
           <a class="diagnostic-link" href="/verification.html">SQLite 检查</a>
+          <button id="notification-settings" class="quiet" type="button">任务提醒</button>
         </section>
       </main>
       <main id="inbox-view" class="inbox-view" hidden>
         <div class="inbox-heading">
           <h1>对话</h1>
           <div class="refresh-controls">
+            <button id="list-menu-button" class="quiet icon-button" type="button" aria-label="对话列表菜单">⋯</button>
             <button id="new-chat-button" class="quiet icon-button" type="button" aria-label="新建对话"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
             <span id="refresh-status" class="sr-only" role="status" aria-live="polite"></span>
             <button id="refresh-button" class="quiet icon-button" type="button" aria-label="刷新"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8.3 8.3 0 0 1 20 12M4 12a8.3 8.3 0 0 0 13.9 5.9"/></svg></button>
@@ -50,8 +53,9 @@
           <label class="sr-only" for="project-filter">项目</label>
           <select id="project-filter"><option value="">全部项目</option></select>
           <label class="sr-only" for="thread-search">搜索已加载的对话</label>
-          <input id="thread-search" type="search" placeholder="搜索对话" />
+          <input id="thread-search" type="search" placeholder="搜索已加载标题" />
         </div>
+        <p id="list-scope" class="field-note"></p>
         <div id="thread-list" class="thread-list"></div>
         <button id="more-threads" class="quiet more" type="button" hidden>加载更多对话</button>
       </main>
@@ -59,9 +63,10 @@
         <header class="chat-header">
           <button id="back-button" class="quiet icon-button" type="button" aria-label="返回对话列表"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
           <div class="chat-heading">
-            <div class="chat-title-row"><button id="chat-pin-button" class="quiet icon-button pin-button" type="button" aria-label="置顶对话" aria-pressed="false"></button><h1 id="chat-title"></h1></div>
+            <div class="chat-title-row"><span id="chat-pinned" class="static-pin" hidden aria-label="已置顶">⌖</span><h1 id="chat-title"></h1></div>
             <div class="chat-metadata"><p id="chat-meta"></p><span id="chat-state" class="state"></span></div>
           </div>
+          <button id="chat-menu-button" class="quiet icon-button" type="button" aria-label="对话菜单">⋯</button>
           <div class="header-actions">
             <span class="connection-state" data-connection-status role="status"></span>
             <button id="chat-settings-button" class="quiet icon-button" type="button" aria-label="连接设置"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2a8 8 0 0 0-1.5.9L5.3 5.4 3 9.4l1.5 1.5a8 8 0 0 0 0 2.2L3 14.6l2.3 4 2.1-.5a8 8 0 0 0 1.5.9l.6 2h5l.6-2a8 8 0 0 0 1.5-.9l2.1.5 2.3-4-1.5-1.5a8 8 0 0 0 0-2.2L21 9.4l-2.3-4-2.1.5a8 8 0 0 0-1.5-.9L14.5 3Z"/><circle cx="12" cy="12" r="3"/></svg></button>
@@ -79,9 +84,12 @@
           <div id="requests" class="requests" aria-live="polite"></div>
           <p id="activity" class="activity" role="status" hidden></p>
         </div>
+        <div id="reading-actions" class="reading-actions" hidden><button id="jump-latest" class="quiet" type="button">回到最新 ↓</button><button id="jump-requests" class="quiet" type="button" hidden>查看待处理</button></div>
         <div class="composer-area">
-          <div class="composer-tools"><button id="parameters-button" class="quiet" type="button">沿用会话参数</button><button id="skills-button" class="quiet" type="button">Skill</button><button id="files-button" class="quiet" type="button">附件</button></div>
+          <div class="queue-controls"><label id="send-mode-label" hidden><span class="sr-only">运行中发送方式</span><select id="send-mode"><option value="immediate">立即追加</option><option value="queue">排队到下一轮</option></select></label><button id="queue-button" type="button" class="quiet">队列</button></div>
+          <div class="composer-tools"><button id="files-button" class="quiet" type="button" aria-label="添加内容">＋</button><button id="parameters-button" class="quiet" type="button">沿用会话参数</button><button id="skills-button" class="quiet" type="button">@</button><button id="expand-input" class="quiet" type="button" aria-expanded="false">展开</button></div>
           <div id="selected-skills" class="selected-skills" hidden></div>
+          <button id="manage-files" class="quiet" type="button" hidden>附件</button>
           <div id="selected-files" hidden></div>
           <div id="selected-annotations" class="selected-annotations" hidden></div>
           <button id="open-attachment-chat" class="quiet" type="button" hidden>在电脑端打开对话以发送附件</button>
@@ -99,14 +107,21 @@
           </form>
         </div>
       </main>
+      <dialog id="add-content-dialog" class="task-dialog add-content-dialog">
+        <div class="dialog-header"><button type="button" class="quiet" data-close-dialog="add-content-dialog">返回</button><h2>添加内容</h2></div>
+        <button id="add-images" type="button" class="quiet">图片</button>
+        <button id="add-files" type="button" class="quiet">文件 · 手机或电脑</button>
+      </dialog>
       <dialog id="new-chat-dialog" class="task-dialog">
         <div class="dialog-header"><button class="quiet icon-button" type="button" data-close-dialog="new-chat-dialog" aria-label="返回"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><h2>新建对话</h2></div>
         <form id="new-chat-form">
           <fieldset id="new-chat-fields">
             <label>项目<select id="new-chat-project"></select></label>
             <p id="new-chat-path" class="field-note"></p>
-            <div class="field-pair"><label>模型<select id="new-chat-model"></select></label><label>思考深度<select id="new-chat-thinking"></select></label></div>
-            <label>首条消息<textarea id="new-chat-prompt" rows="5" required placeholder="输入要执行的任务"></textarea></label>
+            <div class="composer-tools"><button id="new-files-button" class="quiet" type="button" aria-label="添加内容">＋</button><button id="new-parameters-button" class="quiet" type="button">使用默认设置</button><button id="new-context-button" class="quiet" type="button">@</button><button id="new-expand-input" class="quiet" type="button" aria-expanded="false">展开</button></div>
+            <div id="new-references" class="selected-skills" hidden></div>
+            <button id="new-manage-files" class="quiet" type="button" hidden>附件</button><div id="new-selected-files" class="attachment-list composer-attachments"></div>
+            <label class="sr-only" for="new-chat-prompt">首条消息</label><textarea id="new-chat-prompt" rows="3" placeholder="输入要执行的任务"></textarea>
           </fieldset>
           <p id="new-chat-status" class="field-note" role="status" hidden></p>
           <p id="new-chat-error" class="form-error" role="alert" hidden></p>
@@ -114,6 +129,7 @@
           <button id="resolve-create" class="quiet" type="button" hidden>已核对会话列表，恢复编辑</button>
         </form>
       </dialog>
+      <dialog id="new-parameters-dialog" class="task-dialog"><div class="dialog-header"><button type="button" class="quiet" data-close-dialog="new-parameters-dialog">返回</button><h2>首轮参数</h2></div><div class="field-pair"><label>模型<select id="new-chat-model"></select></label><label>思考深度<select id="new-chat-thinking"></select></label></div></dialog>
       <dialog id="options-dialog" class="task-dialog">
         <div class="dialog-header"><button class="quiet icon-button" type="button" data-close-dialog="options-dialog" aria-label="返回"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><h2>发送参数</h2></div>
         <form id="options-form">
@@ -121,17 +137,10 @@
           <p id="options-catalog-status" class="field-note" role="status" hidden></p>
           <div class="field-pair"><label>模型<select id="options-model"></select></label><label>思考深度<select id="options-thinking"></select></label></div>
           <p class="field-note">所选参数用于下一轮。执行中追加沿用当前轮次的参数。</p>
+          <label id="approval-policy-label" hidden>下一轮审批策略<select id="approval-policy"></select></label><p id="approval-policy-status" class="field-note" role="status"></p>
           <p id="options-error" class="form-error" role="alert" hidden></p>
           <button id="save-options" class="primary" type="submit">保存</button>
         </form>
-      </dialog>
-      <dialog id="skills-dialog" class="task-dialog">
-        <div class="dialog-header"><button class="quiet icon-button" type="button" data-close-dialog="skills-dialog" aria-label="返回"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><h2>选择 Skill</h2></div>
-        <p id="skills-status" class="field-note" role="status"></p>
-        <button id="open-skill-chat" class="quiet" type="button" hidden>在电脑端打开对话</button>
-        <p id="skills-error" class="form-error" role="alert" hidden></p>
-        <label class="sr-only" for="skills-search">搜索 Skill</label><input id="skills-search" type="search" placeholder="搜索 Skill" />
-        <form id="skills-form"><div id="skills-list" class="skills-list"></div><button id="save-skills" class="primary" type="submit">使用所选 Skill</button></form>
       </dialog>
       <dialog id="edit-dialog" class="task-dialog">
         <div class="dialog-header"><button class="quiet icon-button" type="button" data-close-dialog="edit-dialog" aria-label="返回"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button><h2>编辑最近一条消息</h2></div>

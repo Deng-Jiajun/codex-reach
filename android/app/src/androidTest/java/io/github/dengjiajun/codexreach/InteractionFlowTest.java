@@ -212,14 +212,11 @@ public class InteractionFlowTest {
         assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的普通草稿' && !document.querySelector('#messages').textContent.includes('<send_user_message_question_reply>')"));
 
         evaluate(webView, "document.querySelector('#skills-button').click(); null");
-        await(webView, "document.querySelector('#skills-dialog').open && !document.querySelector('#save-skills').disabled && !document.querySelector('#open-skill-chat').hidden");
-        evaluate(webView, "document.querySelector('#open-skill-chat').click(); null");
-        await(webView, "document.querySelector('#open-skill-chat').hidden && document.querySelector('#skills-status').textContent.includes('已在电脑端打开')");
-        assertEquals(1, stats().getInt("openCount"));
-        evaluate(webView, "document.querySelector('#skills-search').value='精确协议'; document.querySelector('#skills-search').dispatchEvent(new Event('input',{bubbles:true})); null");
-        assertEquals("true", evaluate(webView, "document.querySelectorAll('#skills-list .skill-choice').length===1 && document.querySelector('#skills-list').textContent.includes('interaction-check')"));
-        evaluate(webView, "document.querySelector('#skills-list input[type=checkbox]').click(); document.querySelector('#skills-form').requestSubmit(); null");
-        await(webView, "!document.querySelector('#skills-dialog').open && document.querySelector('#selected-skills').textContent.includes('interaction-check')");
+        await(webView, "document.querySelector('.context-picker')?.open && document.querySelectorAll('.context-result').length===2");
+        evaluate(webView, "document.querySelector('.context-picker input').value='精确协议'; document.querySelector('.context-picker input').dispatchEvent(new Event('input',{bubbles:true})); null");
+        await(webView, "document.querySelectorAll('.context-result').length===1 && document.querySelector('.context-results').textContent.includes('interaction-check')");
+        evaluate(webView, "document.querySelector('.context-result').click(); null");
+        await(webView, "!document.querySelector('.context-picker') && document.querySelector('#selected-skills').textContent.includes('interaction-check')");
         setComposer(webView, "SKILL_SEND_CHECK");
         SystemClock.sleep(800);
     }

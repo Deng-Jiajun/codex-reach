@@ -1,18 +1,22 @@
 import type { ResponseAnnotation } from './types';
+import { sourceText, rangeOffsets } from './message-content';
 
-export type TextSelection = { startOffset: number; endOffset: number };
+export type TextSelection = { startOffset: number; endOffset: number; text?: string };
 
 export function selectedMessageText(content: HTMLElement): TextSelection | undefined {
   const selection = window.getSelection();
   if (!selection?.rangeCount || selection.isCollapsed) return;
-  const range = selection.getRangeAt(0);
+  const range = selection.getRangeAt(0).cloneRange();
   if (!content.contains(range.startContainer) || !content.contains(range.endContainer)) return;
-  const prefix = document.createRange();
-  prefix.selectNodeContents(content);
-  prefix.setEnd(range.startContainer, range.startOffset);
-  const startOffset = prefix.toString().length;
-  prefix.setEnd(range.endContainer, range.endOffset);
-  return { startOffset, endOffset: prefix.toString().length };
+  const startElement = range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement;
+  const endElement = range.endContainer instanceof Element ? range.endContainer : range.endContainer.parentElement;
+  const startMarker = startElement?.closest('[data-source-text]');
+  const endMarker = endElement?.closest('[data-source-text]');
+  if (startMarker) range.setStartBefore(startMarker);
+  if (endMarker) range.setEndAfter(endMarker);
+  const visible = range.cloneContents();
+  visible.querySelectorAll('[data-selection-ignore]').forEach(item => item.remove());
+  return { ...rangeOffsets(content, range), text: visible.textContent ?? '' };
 }
 
 export function createSelectionToolbar(root: HTMLElement,
@@ -73,7 +77,7 @@ export function createSelectionToolbar(root: HTMLElement,
       ?? positions.find(top => top >= topBound && top + height <= bottomBound) ?? positions[0];
     toolbar.style.left = `${Math.max(leftBound, Math.min(rightBound - width, (anchor.left + anchor.right - width) / 2))}px`;
     toolbar.style.top = `${Math.max(topBound, Math.min(bottomBound - height, top))}px`;
-    current = { text: content.textContent ?? '', messageId: content.closest<HTMLElement>('.message')!.dataset.messageId!, selection: offsets };
+    current = { text: sourceText(content), messageId: content.closest<HTMLElement>('.message')!.dataset.messageId!, selection: offsets };
   };
   const refresh = () => { if (!frame) frame = requestAnimationFrame(update); };
   toolbar.addEventListener('pointerdown', event => event.preventDefault());
@@ -106,8 +110,31 @@ export function annotationPrompt(prompt: string, annotations: ResponseAnnotation
   return `\n# Response annotations:\nEach item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment.\n<response-annotations>\n${JSON.stringify(annotations)}\n</response-annotations>\n\n## My request:\n${prompt}`;
 }
 
+export function openAnnotationDetail(annotation: ResponseAnnotation, index: number,
+  onSource: (annotation: ResponseAnnotation) => Promise<void>): void {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'task-dialog annotation-detail';
+  const header = document.createElement('div');
+  header.className = 'dialog-header';
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'quiet';
+  close.textContent = '返回';
+  close.addEventListener('click', () => dialog.close());
+  const title = document.createElement('h2');
+  title.textContent = `引用 ${index + 1}`;
+  header.append(close, title);
+  const body = document.createElement('div');
+  renderAnnotations(body, [annotation], undefined, undefined, onSource, index);
+  body.querySelector('details')!.open = true;
+  dialog.append(header, body);
+  dialog.addEventListener('close', () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
 export function openAnnotation(text: string, messageId: string, selection: TextSelection | undefined,
-  comment: string, onAdd: (annotation: ResponseAnnotation) => void): void {
+  comment: string, onAdd: (annotation: ResponseAnnotation) => void, selectionLocked = false): void {
   const dialog = document.createElement('dialog');
   dialog.className = 'task-dialog annotation-dialog';
   dialog.id = 'annotation-dialog';
@@ -124,14 +151,21 @@ export function openAnnotation(text: string, messageId: string, selection: TextS
   input.value = text;
   opinion.value = comment;
   source.open = !selection;
+  source.hidden = selectionLocked;
+  if (selectionLocked) {
+    const status = document.createElement('p');
+    status.className = 'field-note'; status.textContent = '来源暂不可读，已有摘录保留，可修改意见';
+    source.after(status);
+  }
   let chosen = selection;
   const update = () => {
-    const selectedText = chosen ? text.slice(chosen.startOffset, chosen.endOffset) : '';
+    const selectedText = chosen ? chosen.text ?? text.slice(chosen.startOffset, chosen.endOffset) : '';
     excerpt.textContent = selectedText;
     excerpt.hidden = !selectedText || source.open;
     add.disabled = !selectedText.trim();
   };
   input.addEventListener('select', () => {
+    if (chosen?.startOffset === input.selectionStart && chosen?.endOffset === input.selectionEnd) return;
     chosen = { startOffset: input.selectionStart, endOffset: input.selectionEnd };
     update();
   });
@@ -139,8 +173,9 @@ export function openAnnotation(text: string, messageId: string, selection: TextS
   dialog.querySelector('[data-back]')!.addEventListener('click', () => dialog.close());
   add.addEventListener('click', () => {
     if (!chosen || add.disabled) return;
-    onAdd({ text: text.slice(chosen.startOffset, chosen.endOffset), annotation: opinion.value.trim(),
-      source: { messageId, ...chosen } });
+    onAdd({ text: chosen.text ?? text.slice(chosen.startOffset, chosen.endOffset), annotation: opinion.value.trim(),
+      source: { messageId, startOffset: chosen.startOffset, endOffset: chosen.endOffset,
+        contentOffsets: { startOffset: chosen.startOffset, endOffset: chosen.endOffset } } });
     dialog.close();
   });
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
@@ -153,7 +188,11 @@ export function openAnnotation(text: string, messageId: string, selection: TextS
 }
 
 export function renderAnnotations(container: HTMLElement, annotations: ResponseAnnotation[],
-  onRemove?: (index: number) => void, onEdit?: (index: number) => void): void {
+  onRemove?: (index: number) => void, onEdit?: (index: number) => void,
+  onSource?: (annotation: ResponseAnnotation) => Promise<void>, firstIndex = 0): void {
+  const signature = JSON.stringify(annotations);
+  if (!onRemove && !onEdit && container.dataset.annotations === signature) return;
+  container.dataset.annotations = signature;
   container.replaceChildren();
   container.hidden = !annotations.length;
   for (const [index, annotation] of annotations.entries()) {
@@ -169,7 +208,31 @@ export function renderAnnotations(container: HTMLElement, annotations: ResponseA
     const excerpt = document.createElement('blockquote');
     excerpt.className = 'annotation-excerpt';
     excerpt.textContent = annotation.text;
-    body.append(excerpt);
+    if (onEdit) {
+      const label = document.createElement('span');
+      label.textContent = `引用 ${index + 1}`;
+      body.append(label, excerpt);
+    } else {
+      const details = document.createElement('details');
+      details.className = 'sent-annotation';
+      const summary = document.createElement('summary');
+      summary.textContent = `引用 ${firstIndex + index + 1} · ${annotation.text.replace(/\s+/g, ' ').slice(0, 72)}`;
+      details.append(summary, excerpt);
+      if (onSource && annotation.source) {
+        const source = document.createElement('button');
+        source.type = 'button';
+        source.className = 'quiet';
+        source.textContent = '查看来源';
+        source.addEventListener('click', async () => {
+          source.disabled = true;
+          try { await onSource(annotation); }
+          catch (error) { source.textContent = error instanceof Error ? error.message : '来源不可用'; }
+          finally { source.disabled = false; }
+        });
+        details.append(source);
+      }
+      body.append(details);
+    }
     if (annotation.annotation) {
       const comment = document.createElement('p');
       comment.className = 'annotation-comment';

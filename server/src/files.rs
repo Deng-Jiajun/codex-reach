@@ -5,7 +5,6 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
-use uuid::Uuid;
 
 pub const MAX_FILE_BYTES: usize = 20 * 1024 * 1024;
 
@@ -40,6 +39,38 @@ pub struct Preview {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetLogicalDrives() -> u32;
+    fn GetLocalTime(time: *mut [u16; 8]);
+}
+
+pub fn date_directory(root: &Path) -> PathBuf {
+    let mut time = [0_u16; 8];
+    unsafe { GetLocalTime(&mut time) };
+    root.join(format!("{:04}-{:02}-{:02}", time[0], time[1], time[3]))
+}
+
+pub fn validate_name(name: &str) -> Result<()> {
+    let path = Path::new(name);
+    ensure!(
+        !name.is_empty()
+            && !name.contains(['/', '\\', ':', '\r', '\n'])
+            && matches!(path.components().next(), Some(Component::Normal(_)))
+            && path.components().count() == 1,
+        "上传文件名无效"
+    );
+    Ok(())
+}
+
+pub fn numbered_path(directory: &Path, name: &str, index: usize) -> PathBuf {
+    if index == 0 {
+        return directory.join(name);
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path
+        .extension()
+        .map(|value| format!(".{}", value.to_string_lossy()))
+        .unwrap_or_default();
+    directory.join(format!("{stem} ({index}){extension}"))
 }
 
 pub fn browse(path: Option<&str>) -> Result<DirectoryListing> {
@@ -125,27 +156,29 @@ pub fn upload(root: &Path, name: &str, bytes: &[u8]) -> Result<FileAttachment> {
     );
     ensure!(bytes.len() <= MAX_FILE_BYTES, "上传文件不能超过 20 MiB");
     ensure!(root.is_absolute(), "上传目录必须使用绝对路径");
-    fs::create_dir_all(root).context("无法创建上传目录")?;
-    let directory = root.join(Uuid::new_v4().to_string());
-    fs::create_dir(&directory)?;
-    let path = directory.join(name);
+    let directory = date_directory(root);
+    fs::create_dir_all(&directory).context("无法创建上传目录")?;
+    let mut index = 0;
+    let (path, mut file) = loop {
+        let path = numbered_path(&directory, name, index);
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => break (path, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => index += 1,
+            Err(error) => return Err(error.into()),
+        }
+    };
     let result = (|| -> Result<FileAttachment> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         Ok(FileAttachment {
             path: display_path(&path)?,
-            name: name.to_owned(),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
             directory: false,
             image: is_image_path(&path),
         })
     })();
     if result.is_err() {
         let _ = fs::remove_file(&path);
-        let _ = fs::remove_dir(&directory);
     }
     result
 }
@@ -188,13 +221,13 @@ pub fn is_image_path(path: &Path) -> bool {
         })
 }
 
-fn absolute_path(path: &str) -> Result<PathBuf> {
+pub fn absolute_path(path: &str) -> Result<PathBuf> {
     let path = Path::new(path);
     ensure!(path.is_absolute(), "文件路径必须是绝对路径");
     Ok(std::path::absolute(path)?)
 }
 
-fn display_path(path: &Path) -> Result<String> {
+pub fn display_path(path: &Path) -> Result<String> {
     let path = path.to_str().context("文件路径无法转换为 UTF-8")?;
     if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
         return Ok(format!("//{}", path.replace('\\', "/")));
@@ -208,6 +241,7 @@ fn display_path(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn upload_keeps_filename_isolates_duplicates_and_browses_directory() {
@@ -218,8 +252,9 @@ mod tests {
         assert_ne!(first.path, second.path);
         assert_eq!(fs::read(&first.path).unwrap(), b"first");
         let listing = browse(Some(root.to_str().unwrap())).unwrap();
-        assert_eq!(listing.entries.len(), 2);
+        assert_eq!(listing.entries.len(), 1);
         assert!(listing.entries.iter().all(|entry| entry.directory));
+        assert_eq!(second.name, "资料 (1).txt");
         assert!(upload(&root, "../outside.txt", b"data").is_err());
         assert!(resolve(&["relative.txt".to_owned()]).is_err());
         fs::remove_dir_all(root).unwrap();

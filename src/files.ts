@@ -1,4 +1,6 @@
 import type { ReachClient } from './api';
+import { uploadFiles, renderUploadTasks } from './uploads';
+import { computerImage, displayImage, saveImage, openReader } from './reader';
 import './files.css';
 
 export type FileAttachment = { path: string; name: string; directory: boolean; image: boolean; url?: string };
@@ -17,7 +19,6 @@ type AttachmentRow = {
   options: AttachmentOptions;
 };
 
-const maxUploadSize = 20 * 1024 * 1024;
 const attachmentRows = new WeakMap<HTMLElement, AttachmentRow[]>();
 let pickerDialog: HTMLDialogElement | null = null;
 let previewDialog: HTMLDialogElement | null = null;
@@ -60,20 +61,7 @@ function sizeText(size: number | null): string {
   return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function readFile(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener('load', () => {
-      const result = String(reader.result);
-      resolve(result.slice(result.indexOf(',') + 1));
-    }, { once: true });
-    reader.addEventListener('error', () => reject(reader.error ?? new Error('文件读取失败')), { once: true });
-    reader.addEventListener('abort', () => reject(new Error('文件读取已取消')), { once: true });
-    reader.readAsDataURL(file);
-  });
-}
-
-export function openFilePicker(client: ReachClient, initialPath: string, onSelect: (files: FileAttachment[]) => void): void {
+export function openFilePicker(client: ReachClient, initialPath: string, onSelect: (files: FileAttachment[]) => void, imagesOnly = false, draftKey = ''): void {
   if (pickerDialog?.open) { pickerDialog.focus(); return; }
   const dialog = createDialog('添加附件', 'files-dialog');
   pickerDialog = dialog;
@@ -106,7 +94,9 @@ export function openFilePicker(client: ReachClient, initialPath: string, onSelec
   const upload = element('input');
   upload.type = 'file';
   upload.multiple = true;
-  uploadLabel.append(upload, element('span', '每个文件不超过 20 MiB', 'field-note'));
+  if (imagesOnly) upload.accept = 'image/*';
+  uploadLabel.append(upload);
+  uploadLabel.hidden = !draftKey;
   controls.append(pathForm, navigation, entries, uploadLabel);
   const status = element('p', '', 'field-note files-status');
   status.setAttribute('role', 'status');
@@ -145,7 +135,15 @@ export function openFilePicker(client: ReachClient, initialPath: string, onSelec
         row.setAttribute('aria-label', `${entry.directory ? '打开文件夹' : '选择文件'} ${entry.name}`);
         row.append(element('span', entry.name, 'files-entry-name'), element('small', entry.directory ? '文件夹' : sizeText(entry.size), 'files-entry-meta'));
         row.addEventListener('click', () => { if (entry.directory) void browse(entry.path); else void select([entry.path]); });
-        entries.append(row);
+        const item = element('div', '', 'files-entry-row');
+        item.append(row);
+        if (!entry.directory) {
+          const preview = button('阅读', 'quiet');
+          preview.setAttribute('aria-label', `阅读 ${entry.name}`);
+          preview.addEventListener('click', () => void openReader(entry.path, client, result.path ?? undefined));
+          item.append(preview);
+        }
+        entries.append(item);
       }
       if (!result.entries.length) entries.append(element('p', '此文件夹为空', 'files-empty'));
     } catch (failure) { if (dialog.open) showError(errorText(failure)); }
@@ -171,47 +169,42 @@ export function openFilePicker(client: ReachClient, initialPath: string, onSelec
   parent.addEventListener('click', () => { if (listing?.parent !== null && listing?.parent !== undefined) void browse(listing.parent); });
   drives.addEventListener('click', () => void browse(''));
   selectFolder.addEventListener('click', () => { if (listing?.path) void select([listing.path]); });
-  upload.addEventListener('change', async () => {
+  upload.addEventListener('change', () => {
     const files = [...upload.files ?? []];
     upload.value = '';
     if (busy || !files.length) return;
-    setBusy(true);
-    showError();
-    const attachments: FileAttachment[] = [];
-    const failures: string[] = [];
-    for (const [index, file] of files.entries()) {
-      if (!dialog.open) return;
-      if (file.size > maxUploadSize) { failures.push(`${file.name} 超过 20 MiB`); continue; }
-      setBusy(true, `正在上传 ${file.name}（${index + 1}/${files.length}）…`);
-      try {
-        const data = await readFile(file);
-        if (!dialog.open) return;
-        const attachment = await client.request<FileAttachment>('/files/upload', 'POST', { name: file.name, data });
-        if (!dialog.open) return;
-        attachments.push(attachment);
-        onSelect([attachment]);
-      } catch (failure) { failures.push(`${file.name} 上传失败，${errorText(failure)}`); }
-    }
-    if (!dialog.open) return;
-    if (failures.length) {
-      setBusy(false, attachments.length ? `已添加 ${attachments.length} 个文件` : '');
-      showError(failures.join('\n'));
-    } else dialog.close();
+    uploadFiles(client, draftKey, files);
+    dialog.close();
   });
   dialog.showModal();
-  void browse(initialPath);
+  if (imagesOnly) {
+    pathForm.hidden = true;
+    navigation.hidden = true;
+    entries.hidden = true;
+    upload.click();
+  } else void browse(initialPath);
 }
 
 function safeImageUrl(url: string): string | null {
   if (/^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/i.test(url)) return url;
   try {
     const parsed = new URL(url);
-    if (parsed.protocol === 'https:' && !parsed.username && !parsed.password) return parsed.href;
+    if (['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password) return parsed.href;
   } catch { return null; }
   return null;
 }
 
-function openPreview(attachment: MessageAttachment, client?: ReachClient | null): void {
+export async function loadImage(attachment: MessageAttachment, client?: ReachClient | null, refresh = false): Promise<string> {
+  const source = attachment.url ? safeImageUrl(attachment.url) : null;
+  if (source) return displayImage(source);
+  if (attachment.url?.startsWith('sediment://')) throw new Error('此图片仅有桌面媒体标识，当前读取接口尚未支持');
+  if (!attachment.path) throw new Error('此图片地址无法预览');
+  if (!client) throw new Error('当前未连接电脑');
+  return computerImage(client, attachment.path, refresh);
+}
+
+export function openPreview(attachment: MessageAttachment, client?: ReachClient | null): void {
+  if (attachment.path) { void openReader(attachment.path, client ?? null); return; }
   if (previewDialog?.open) { previewDialog.focus(); return; }
   const dialog = createDialog(attachment.name || '图片预览', 'attachment-preview');
   previewDialog = dialog;
@@ -226,6 +219,18 @@ function openPreview(attachment: MessageAttachment, client?: ReachClient | null)
   const retry = button('重试');
   retry.hidden = true;
   dialog.append(status, error, picture, retry);
+  const save = button('保存原图片到手机');
+  save.addEventListener('click', async () => {
+    save.disabled = true; status.hidden = false; status.textContent = '正在保存…';
+    try {
+      const address = attachment.url && safeImageUrl(attachment.url);
+      if (!address) throw new Error('此图片的原文件地址不可用');
+      const name = /\.(?:png|jpe?g|gif|webp|avif)$/i.test(attachment.name) ? attachment.name : 'image.png';
+      status.textContent = await saveImage(address, name) ? '已保存到所选位置' : '已取消保存';
+    } catch (failure) { status.textContent = errorText(failure); }
+    finally { save.disabled = false; }
+  });
+  dialog.append(save);
   dialog.addEventListener('close', () => {
     picture.removeAttribute('src');
     if (previewDialog === dialog) previewDialog = null;
@@ -246,14 +251,7 @@ function openPreview(attachment: MessageAttachment, client?: ReachClient | null)
     picture.hidden = true;
     retry.disabled = true;
     try {
-      let source = attachment.url ? safeImageUrl(attachment.url) : null;
-      if (!source && attachment.path) {
-        if (!client) throw new Error('当前未连接电脑，无法读取图片');
-        const result = await client.request<{ mime: string; data: string }>('/files/preview', 'POST', { path: attachment.path });
-        if (!dialog.open) return;
-        source = safeImageUrl(`data:${result.mime};base64,${result.data}`);
-      }
-      if (!source) throw new Error('此图片地址无法预览');
+      const source = await loadImage(attachment, client, true);
       if (dialog.open) picture.src = source;
     } catch (failure) { if (dialog.open) showFailure(errorText(failure)); }
   }
@@ -294,14 +292,20 @@ async function copyPath(path: string, status: HTMLElement, parent: HTMLElement):
 
 function createAttachmentRow(attachment: MessageAttachment, options: AttachmentOptions): AttachmentRow {
   const root = element('div', '', 'attachment-chip');
-  const name = attachment.image ? button(attachment.name || '查看图片', 'attachment-image-button') : element('span', attachment.name || attachment.path || '附件', 'attachment-name');
+  const name = button(attachment.name || attachment.path || '附件', attachment.image ? 'attachment-image-button' : 'attachment-name');
   const remove = button('×', 'attachment-remove');
   remove.setAttribute('aria-label', `移除附件 ${attachment.name}`);
   const row: AttachmentRow = { root, attachment, remove, index: 0, options };
   if (attachment.image) {
     name.setAttribute('aria-label', `预览图片 ${attachment.name}`);
     name.addEventListener('click', () => openPreview(row.attachment, row.options.client));
-  }
+    const thumbnail = element('img', '', 'attachment-thumbnail');
+    thumbnail.alt = '';
+    thumbnail.loading = 'lazy';
+    name.prepend(thumbnail);
+    void loadImage(attachment, options.client).then(source => { thumbnail.src = source; }).catch(() => { thumbnail.remove(); });
+  } else if (attachment.path && !attachment.directory) name.addEventListener('click', () => void openReader(row.attachment.path!, row.options.client ?? null));
+  else name.disabled = true;
   root.append(name);
   if (attachment.path) {
     const path = element('span', attachment.path, 'attachment-path');
@@ -315,6 +319,33 @@ function createAttachmentRow(attachment: MessageAttachment, options: AttachmentO
   remove.addEventListener('click', () => row.options.onRemove?.(row.index));
   root.append(remove);
   return row;
+}
+
+export function openAttachmentManager(attachments: FileAttachment[], client: ReachClient | null,
+  onRemove?: (index: number) => void, draftKey = ''): void {
+  const dialog = createDialog(`附件（${attachments.length}）`, 'attachment-manager');
+  const list = element('div');
+  const render = () => renderAttachments(list, attachments, { client, onRemove: onRemove ? index => {
+    onRemove(index);
+    render();
+    dialog.querySelector('h2')!.textContent = `附件（${attachments.length}）`;
+  } : undefined });
+  render();
+  dialog.append(list);
+  if (client && draftKey) {
+    const uploads = element('div');
+    const refresh = () => {
+      attachments.splice(0, attachments.length, ...JSON.parse(localStorage.getItem(draftKey) ?? '[]') as FileAttachment[]);
+      render();
+      dialog.querySelector('h2')!.textContent = `附件（${attachments.length}）`;
+      renderUploadTasks(uploads, client, draftKey);
+    };
+    refresh();
+    window.addEventListener('reach-uploads', refresh);
+    dialog.addEventListener('close', () => window.removeEventListener('reach-uploads', refresh), { once: true });
+    dialog.append(uploads);
+  }
+  dialog.showModal();
 }
 
 export function renderAttachments(container: HTMLElement, attachments: MessageAttachment[], options: AttachmentOptions): void {

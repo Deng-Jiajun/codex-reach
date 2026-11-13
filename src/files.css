@@ -26,6 +26,28 @@
 .attachment-preview .dialog-header h2 { min-width: 0; overflow-wrap: anywhere; }
 .attachment-preview-image { display: block; max-width: 100%; max-height: calc(100dvh - 160px); object-fit: contain; margin: 0 auto; }
 .attachment-preview > .quiet { margin-top: 12px; }
+.attachment-thumbnail { width: 40px; height: 40px; object-fit: cover; vertical-align: middle; margin-right: 6px; border-radius: 4px; }
+.attachment-manager { max-height: 80dvh; }
+.upload-task { padding: 12px 0; border-top: 1px solid #dce2d7; overflow-wrap: anywhere; }
+.upload-task small { display: block; }
+.attachment-name { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; }
+.task-dialog.reader-dialog { position: fixed; inset: auto 0 0; margin: 0 auto; width: min(100%, 900px); max-width: 100%; height: 50dvh; max-height: calc(100dvh - var(--safe-area-inset-top, env(safe-area-inset-top, 0px))); padding: 12px 14px max(14px, var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px))); border-radius: 16px 16px 0 0; overflow: hidden; }
+.reader-dialog[open] { display: flex; flex-direction: column; }
+.task-dialog.reader-dialog.reader-full { height: calc(100dvh - var(--safe-area-inset-top, env(safe-area-inset-top, 0px))); }
+.reader-dialog .dialog-header { flex-shrink: 0; touch-action: pan-x; }
+.reader-dialog .dialog-header h2 { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reader-dialog button { min-height: 48px; }
+.reader-body { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; }
+.reader-body iframe { width: 100%; height: 100%; border: 0; }
+.reader-body pre { white-space: pre; font: 13px/1.6 Consolas, monospace; overflow-x: auto; }
+.reader-image { max-width: 100%; height: auto; }
+.reader-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.reader-dialog .reader-controls select { width: auto; padding: 5px; }
+.attachment-manager > .attachments { max-height: 60dvh; overflow-y: auto; display: flex; flex-direction: column; flex-wrap: nowrap; overscroll-behavior: contain; }
+.attachment-manager .attachment-remove { min-width: 48px; min-height: 48px; }
 @media (hover: hover) and (pointer: fine) {
   .files-entry:hover, .attachment-remove:hover { background: #dfe8db; }
 }
+.files-entry-row { display: flex; align-items: center; gap: 6px; }
+.files-entry-row .files-entry { flex: 1; min-width: 0; }
+.files-entry-row > .quiet { min-width: 48px; min-height: 48px; }
