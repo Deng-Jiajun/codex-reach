@@ -221,7 +221,16 @@ public class MobileUpgradeTest {
 
     private void screenshot(String name) throws Exception {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-        InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(500, 10000);
+        if (name.equals("notifications")) {
+            // Ongoing notification updates can prevent global accessibility idleness.
+            awaitCondition(() -> {
+                android.view.accessibility.AccessibilityNodeInfo root =
+                    InstrumentationRegistry.getInstrumentation().getUiAutomation().getRootInActiveWindow();
+                return root != null && "com.android.systemui".contentEquals(root.getPackageName());
+            }, "notification panel visible");
+        } else {
+            InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(500, 10000);
+        }
         File file = new File(context.getExternalFilesDir(null), "verification-" + name + ".png");
         try (FileOutputStream output = new FileOutputStream(file)) { Bitmap bitmap = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot(); assertTrue(bitmap != null); bitmap.compress(Bitmap.CompressFormat.PNG, 100, output); bitmap.recycle(); }
     }
