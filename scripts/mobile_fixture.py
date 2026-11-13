@@ -70,7 +70,7 @@ def get(handler, url, organization, files, png):
         if name.endswith(".css"):
             binary(handler, b"body{background:rgb(231,240,227)}", "text/css")
         elif name.endswith(".html"):
-            binary(handler, b'<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css"></head><body><h1>READER_HTML</h1><img src="image.png"><button onclick="document.querySelector(\'#result\').textContent=\'READER_SCRIPT_OK\'">Run</button><p id="result"></p><script>window.bridgePresent=!!window.Capacitor</script></body></html>', "text/html; charset=utf-8")
+            binary(handler, b'<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css"></head><body><h1>READER_HTML</h1><img src="image.png"><button onclick="document.querySelector(\'#result\').textContent=\'READER_SCRIPT_OK\'">Run</button><p id="result"></p><p><a id="next-page" href="next.html">Next page</a></p><script>window.bridgePresent=!!window.Capacitor</script></body></html>', "text/html; charset=utf-8")
         elif name.endswith(".pdf"):
             binary(handler, pdf_bytes(), "application/pdf")
         elif name.endswith(".png"):

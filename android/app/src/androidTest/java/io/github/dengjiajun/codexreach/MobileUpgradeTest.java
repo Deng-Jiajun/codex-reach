@@ -14,6 +14,7 @@ import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.MotionEvent;
 import android.webkit.WebView;
 import android.widget.TextView;
 import androidx.lifecycle.Lifecycle;
@@ -86,8 +87,13 @@ public class MobileUpgradeTest {
         clickText(reader, "展开");
         awaitCondition(() -> windowRatio(reader) > .85, "reader expanded");
         screenshot("reader-html");
-        evaluate(document, "location.href='next.html';null");
-        await(document, "location.href.endsWith('/next.html') && document.querySelector('h1')?.textContent==='READER_HTML'");
+        tapElement(document, "#next-page");
+        await(document, "location.href.endsWith('/next.html') && document.readyState==='complete'");
+        AtomicReference<Boolean> hasBackHistory = new AtomicReference<>(false);
+        awaitCondition(() -> {
+            InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> hasBackHistory.set(document.canGoBack()));
+            return hasBackHistory.get();
+        }, "WebView back history created by page link");
         shell("input keyevent KEYCODE_BACK");
         await(document, "location.href.endsWith('/mobile.html')");
         shell("input keyevent KEYCODE_BACK");
@@ -182,6 +188,23 @@ public class MobileUpgradeTest {
     }
 
     private void clickText(Activity activity, String label) { InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> { View target = text(activity.getWindow().getDecorView(), label); assertTrue(target != null); target.performClick(); }); }
+
+    private void tapElement(WebView web, String selector) throws Exception {
+        JSONObject point = new JSONObject(evaluate(web, "(()=>{const rect=document.querySelector(" + JSONObject.quote(selector)
+            + ").getBoundingClientRect();return {x:(rect.left+rect.width/2)*devicePixelRatio,y:(rect.top+rect.height/2)*devicePixelRatio}})()"));
+        int[] origin = new int[2];
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> web.getLocationOnScreen(origin));
+        float x = origin[0] + (float) point.getDouble("x");
+        float y = origin[1] + (float) point.getDouble("y");
+        long started = SystemClock.uptimeMillis();
+        MotionEvent down = MotionEvent.obtain(started, started, MotionEvent.ACTION_DOWN, x, y, 0);
+        InstrumentationRegistry.getInstrumentation().sendPointerSync(down);
+        down.recycle();
+        SystemClock.sleep(60);
+        MotionEvent up = MotionEvent.obtain(started, SystemClock.uptimeMillis(), MotionEvent.ACTION_UP, x, y, 0);
+        InstrumentationRegistry.getInstrumentation().sendPointerSync(up);
+        up.recycle();
+    }
 
     private double windowRatio(Activity activity) {
         AtomicReference<Double> result = new AtomicReference<>();

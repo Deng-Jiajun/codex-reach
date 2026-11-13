@@ -136,7 +136,7 @@ public class ReaderActivity extends Activity {
             }
         });
         web.setWebViewClient(new WebViewClient() {
-            @Override public void onPageFinished(WebView view, String address) {
+            @Override public void doUpdateVisitedHistory(WebView view, String address, boolean isReload) {
                 boolean canGoBack = view.canGoBack();
                 if (canGoBack == backRegistered) return;
                 if (canGoBack) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, webBack);
