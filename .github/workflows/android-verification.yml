@@ -117,13 +117,21 @@ jobs:
             bash scripts/android-smoke.sh;
             python3 scripts/chat-fixture.py > artifacts/organization-fixture.txt 2>&1 & organization_fixture_pid=$!;
             trap "kill $organization_fixture_pid; adb logcat -d > artifacts/organization-logcat.txt || true; adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-selection-popover.png artifacts/ || true" EXIT;
+            pull_verification() {
+            for attempt in 1 2 3; do
+            if adb pull "$1" artifacts/; then return 0; fi;
+            timeout 30 adb wait-for-device || return 1;
+            sleep 2;
+            done;
+            return 1;
+            };
             for stage in organization organization-persist; do
             adb shell am force-stop io.github.dengjiajun.codexreach.verification;
             adb shell am instrument -w -r -e class io.github.dengjiajun.codexreach.OrganizationFlowTest
             -e stage "$stage" io.github.dengjiajun.codexreach.verification.test/androidx.test.runner.AndroidJUnitRunner
             | tee "artifacts/instrumentation-$stage.txt";
             grep -q "OK (1 test)" "artifacts/instrumentation-$stage.txt";
-            adb pull "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png" artifacts/;
+            pull_verification "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png";
             done;
             for stage in reader notifications notifications-persist; do
             adb shell am force-stop io.github.dengjiajun.codexreach.verification;
@@ -137,11 +145,11 @@ jobs:
             -e stage "$stage" io.github.dengjiajun.codexreach.verification.test/androidx.test.runner.AndroidJUnitRunner
             | tee "artifacts/instrumentation-$stage.txt";
             grep -q "OK (1 test)" "artifacts/instrumentation-$stage.txt";
-            adb pull "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png" artifacts/;
+            pull_verification "/sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-$stage.png";
             done;
-            adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-html.png artifacts/;
-            adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-pdf.png artifacts/;
-            adb pull /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-keyboard-composer.png artifacts/;
+            pull_verification /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-html.png;
+            pull_verification /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-reader-pdf.png;
+            pull_verification /sdcard/Android/data/io.github.dengjiajun.codexreach.verification/files/verification-keyboard-composer.png;
             curl --fail --silent http://127.0.0.1:4320/control/organization-stats > artifacts/organization-stats.json
             '
       - name: Upload APK and verification results
