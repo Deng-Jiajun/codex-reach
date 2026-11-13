@@ -62,7 +62,15 @@ public class MobileUpgradeTest {
                 NotificationsPlugin.preferences(context).edit().putBoolean("enabled", false).commit();
                 context.stopService(new Intent(context, NotificationService.class));
             } else throw new AssertionError("Unknown stage " + stage);
+            if (stage.equals("notifications")) {
+                assertTrue(InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                    .performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_NOTIFICATIONS));
+            }
             screenshot(stage);
+            if (stage.equals("notifications")) {
+                InstrumentationRegistry.getInstrumentation().getUiAutomation()
+                    .performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK);
+            }
         }
     }
 
@@ -212,6 +220,8 @@ public class MobileUpgradeTest {
     }
 
     private void screenshot(String name) throws Exception {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(500, 10000);
         File file = new File(context.getExternalFilesDir(null), "verification-" + name + ".png");
         try (FileOutputStream output = new FileOutputStream(file)) { Bitmap bitmap = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot(); assertTrue(bitmap != null); bitmap.compress(Bitmap.CompressFormat.PNG, 100, output); bitmap.recycle(); }
     }

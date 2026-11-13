@@ -53,9 +53,10 @@ public class ReaderActivity extends Activity {
     private float gestureStart;
 
     private Button button(String label, Runnable action) {
-        Button button = new Button(this);
+        Button button = new Button(this, null, android.R.attr.borderlessButtonStyle);
         button.setText(label);
         button.setMinHeight(dp(48));
+        button.setMinWidth(dp(48));
         button.setOnClickListener(view -> action.run());
         return button;
     }

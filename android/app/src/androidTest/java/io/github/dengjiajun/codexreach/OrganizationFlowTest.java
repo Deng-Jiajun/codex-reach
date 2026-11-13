@@ -325,6 +325,8 @@ public class OrganizationFlowTest {
     }
 
     private void captureScreenshot(String name) throws Exception {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+        InstrumentationRegistry.getInstrumentation().getUiAutomation().waitForIdle(500, 10000);
         File screenshot = new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getExternalFilesDir(null), "verification-" + name + ".png");
         try (FileOutputStream output = new FileOutputStream(screenshot)) {
             Bitmap bitmap = InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();

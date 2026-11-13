@@ -133,9 +133,12 @@ def post(handler, organization, files, png):
         handler.reply({"name": name, "size": len(content), "kind": kind, "prefix": f"/reader/{token}/", "relative": name})
     elif path == "/api/uploads":
         uploads.setdefault(data["id"], {**data, "offset": 0, "attachment": None, "data": bytearray()})
+        upload = uploads[data["id"]]
+        upload["requestBodyBytes"] = upload.get("requestBodyBytes", 0) + int(handler.headers.get("Content-Length", 0))
         handler.reply(receipt(uploads[data["id"]]))
     elif path.startswith("/api/uploads/"):
         upload = uploads[path.split("/")[3]]
+        upload["requestBodyBytes"] = upload.get("requestBodyBytes", 0) + int(handler.headers.get("Content-Length", 0))
         if path.endswith("/chunk"):
             decoded = base64.b64decode(data["data"])
             upload["transferBytes"] = upload.get("transferBytes", 0) + len(decoded)
@@ -154,7 +157,7 @@ def post(handler, organization, files, png):
             upload["attachment"] = {"path": source, "name": upload["name"], "directory": False, "image": upload["name"].endswith(".png")}
             organization["uploadedFiles"][source] = upload["attachment"]
             organization["uploadedData"][source] = bytes(upload["data"])
-            organization["uploadRequests"].append({"name": upload["name"], "size": upload["size"], "transferBytes": upload.get("transferBytes", 0), "gzipChunks": upload.get("gzipChunks", 0), "sha256": hashlib.sha256(upload["data"]).hexdigest()})
+            organization["uploadRequests"].append({"name": upload["name"], "size": upload["size"], "transferBytes": upload.get("transferBytes", 0), "requestBodyBytes": upload["requestBodyBytes"], "gzipChunks": upload.get("gzipChunks", 0), "sha256": hashlib.sha256(upload["data"]).hexdigest()})
         handler.reply(receipt(upload))
     elif path.endswith("/queue"):
         chat = path.split("/")[3]
