@@ -56,11 +56,11 @@ public class OrganizationFlowTest {
     }
 
     private void connectIfNeeded(WebView webView) throws Exception {
-        await(webView, "document.querySelector('#connect-button')?.disabled===false || document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'");
+        await(webView, "document.querySelector('#connect-button')?.disabled===false || document.querySelector('.app-header [data-connection-status]').textContent==='已连接'");
         if (evaluate(webView, "!localStorage.getItem('codex-reach-connection')").equals("true")) {
             evaluate(webView, "document.querySelector('#server-url').value='http://10.0.2.2:4320'; document.querySelector('#server-key').value='fixture-access'; document.querySelector('#connection-form').requestSubmit(); null");
         }
-        await(webView, "document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'");
+        await(webView, "document.querySelector('.app-header [data-connection-status]').textContent==='已连接'");
     }
 
     private void openThread(WebView webView, String id, String title) throws Exception {

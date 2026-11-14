@@ -34,7 +34,7 @@ public class InteractionFlowTest {
             AtomicReference<WebView> view = new AtomicReference<>();
             scenario.onActivity(activity -> view.set(activity.getBridge().getWebView()));
             WebView webView = view.get();
-            await(webView, "document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'");
+            await(webView, "document.querySelector('.app-header [data-connection-status]').textContent==='已连接'");
             if (stage.equals("approvals")) {
                 openInteractionChat(webView);
                 verifyApprovals(webView);

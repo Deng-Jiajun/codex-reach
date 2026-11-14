@@ -32,7 +32,7 @@ public class TaskFlowTest {
             AtomicReference<WebView> view = new AtomicReference<>();
             scenario.onActivity(activity -> view.set(activity.getBridge().getWebView()));
             WebView webView = view.get();
-            await(webView, "!document.querySelector('#chat-view').hidden && document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'");
+            await(webView, "!document.querySelector('#chat-view').hidden && document.querySelector('.app-header [data-connection-status]').textContent==='已连接'");
             evaluate(webView, "document.querySelector('#back-button').click(); null");
             await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(document.querySelector('[data-thread-id=\"fixture-loading\"]'))");
 

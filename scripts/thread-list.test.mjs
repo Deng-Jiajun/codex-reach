@@ -12,10 +12,10 @@ test('all group modes put pinned chats first and retain descending activity with
     assert.deepEqual(groups.slice(1).flatMap(group => group.threads.map(thread => thread.id)), ['newer', 'older']);
   }
 });
-test('project grouping separates project identity and standalone directory', () => {
+test('project grouping separates saved projects from chats without a project', () => {
   const groups = groupThreads([chat('a', 1, { projectId: 'a' }), chat('b', 2, { projectId: 'b' }), chat('c', 3)],
     [{ id: 'a', name: 'A', path: 'D:/A' }, { id: 'b', name: 'B', path: 'D:/B' }], 'project');
-  assert.deepEqual(groups.map(group => group.title), ['A', 'B', 'Example']);
+  assert.deepEqual(groups.map(group => group.title).sort(), ['A', 'B', '无项目'].sort());
 });
 test('status grouping uses explicit waiting evidence and hides idle labels', () => {
   const groups = groupThreads([chat('idle', 1), chat('running', 2, { status: 'active' }), chat('waiting', 3, { waitingForUser: true })], [], 'status');
@@ -46,14 +46,30 @@ test('project identity and Windows directory spelling share one project group', 
   assert.deepEqual(groups[0].threads.map(thread => thread.id), ['second-id', 'directory-only', 'with-project']);
 });
 
-test('same directory names in different roots remain distinguishable', () => {
+test('saved projects with the same name in different roots remain distinguishable', () => {
   const groups = groupThreads([
     chat('one', 1, { cwd: 'D:/Projects/pc' }),
     chat('two', 2, { cwd: 'E:/Projects/pc' }),
     chat('linux-upper', 3, { cwd: '/home/PC' }),
     chat('linux-lower', 4, { cwd: '/home/pc' }),
-  ], [], 'project');
+  ], [
+    { id: 'one', name: 'pc', path: 'D:/Projects/pc' },
+    { id: 'two', name: 'pc', path: 'E:/Projects/pc' },
+    { id: 'linux-upper', name: 'PC', path: '/home/PC' },
+    { id: 'linux-lower', name: 'pc', path: '/home/pc' },
+  ], 'project');
   assert.equal(groups.length, 4);
   assert.ok(groups.some(group => group.title === 'pc · D:/Projects/pc'));
   assert.ok(groups.some(group => group.title === 'pc · E:/Projects/pc'));
+});
+
+test('unassigned chats share one group without exposing generated folder names', () => {
+  const groups = groupThreads([
+    chat('test', 1, { cwd: 'C:/Example/files-mentioned-by-the-user-first' }),
+    chat('other', 3, { cwd: 'D:/Another/directory', projectId: 'removed-project' }),
+    chat('empty', 2, { cwd: '' }),
+  ], [], 'project');
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].title, '无项目');
+  assert.deepEqual(groups[0].threads.map(thread => thread.id), ['other', 'empty', 'test']);
 });

@@ -337,7 +337,7 @@ async function loadInbox(token: number): Promise<void> {
     const repeated = projects.some(item => item.name === project.name && directoryKey(item.path) !== directoryKey(project.path));
     projectFilter.add(new Option(repeated ? `${project.name} · ${project.path}` : project.name, project.id));
   }
-  projectFilter.value = selectedProject;
+  projectFilter.value = [...projectFilter.options].some(option => option.value === selectedProject) ? selectedProject : '';
   renderInbox();
   void refreshThreadStates(token);
   const selectedThread = threads.find(thread => thread.id === selected?.id);
@@ -400,6 +400,16 @@ function menuDialog(title: string): { dialog: HTMLDialogElement; body: HTMLEleme
   return { dialog, body, error };
 }
 
+function appendConnectionSettings(menu: { dialog: HTMLDialogElement; body: HTMLElement }): void {
+  const settings = document.createElement('button'); settings.type = 'button'; settings.className = 'quiet menu-connection';
+  setAction(settings, 'settings', '连接设置');
+  const status = document.createElement('span'); status.className = 'connection-state'; status.dataset.connectionStatus = ''; status.setAttribute('role', 'status');
+  settings.append(status);
+  settings.addEventListener('click', () => { menu.dialog.close(); openSettings(); });
+  menu.body.append(document.createElement('hr'), settings);
+  renderConnection();
+}
+
 function openThreadMenu(thread: Thread): void {
   const menu = menuDialog(threadTitle(thread));
   menu.dialog.classList.add('thread-menu');
@@ -416,6 +426,7 @@ function openThreadMenu(thread: Thread): void {
       finally { button.disabled = !connected; }
     });
     menu.body.append(button);
+    return button;
   };
   action(thread.pinned ? '取消置顶' : '置顶', 'pin', () => togglePin(thread.id));
   const rename = document.createElement('button'); rename.type = 'button'; rename.className = 'quiet'; setAction(rename, 'edit', '改名'); rename.disabled = !connected;
@@ -452,12 +463,9 @@ function openThreadMenu(thread: Thread): void {
   });
   action('改动文件', 'file', async () => { openChanges(client!, thread.id, thread.cwd); });
   if (selected?.id === thread.id) action('在对话中查找', 'search', async () => { openChatSearch(); });
-  if (currentView === 'chat') {
-    const settings = document.createElement('button'); settings.type = 'button'; settings.className = 'quiet'; settings.textContent = '连接设置';
-    settings.addEventListener('click', () => { menu.dialog.close(); openSettings(); });
-    menu.body.append(settings);
-  }
-  action('永久删除', 'trash', async () => { openDeletion(client!, thread, async ids => { await invalidateChats(ids); backToInbox(); }); });
+  menu.body.append(document.createElement('hr'));
+  action('永久删除', 'trash', async () => { openDeletion(client!, thread, async ids => { await invalidateChats(ids); backToInbox(); }); }).classList.add('danger');
+  if (currentView === 'chat') appendConnectionSettings(menu);
 }
 
 async function invalidateChats(ids: string[]): Promise<void> {
@@ -521,32 +529,42 @@ function markLatestRead(): void {
   void setRead(id, true).catch(() => { /* Preserve unread state until a later sync or an explicit read-state action */ });
 }
 
+element('project-filter-button').addEventListener('click', () => {
+  const menu = menuDialog('筛选项目');
+  menu.dialog.classList.add('project-filter-dialog');
+  const trigger = element('project-filter-button');
+  trigger.setAttribute('aria-expanded', 'true');
+  menu.dialog.addEventListener('close', () => trigger.setAttribute('aria-expanded', 'false'), { once: true });
+  for (const option of projectFilter.options) {
+    const label = document.createElement('label'); label.className = 'project-choice';
+    const text = document.createElement('span'); text.textContent = option.value ? option.text : '全部对话';
+    const radio = document.createElement('input'); radio.type = 'radio'; radio.name = 'project'; radio.value = option.value; radio.checked = option.value === projectFilter.value;
+    radio.addEventListener('change', () => { projectFilter.value = radio.value; renderInbox(); menu.dialog.close(); });
+    label.append(text, radio); menu.body.append(label);
+  }
+});
+
 element('list-menu-button').addEventListener('click', () => {
   const menu = menuDialog('对话列表');
-  const filterLabel = document.createElement('label'); filterLabel.textContent = '筛选项目';
-  const filter = projectFilter.cloneNode(true) as HTMLSelectElement;
-  filter.removeAttribute('id'); filter.hidden = false; filter.value = projectFilter.value;
-  filter.addEventListener('change', () => {
-    projectFilter.value = filter.value; renderInbox(); menu.dialog.close();
-  });
-  filterLabel.append(filter); menu.body.append(filterLabel);
   const legend = document.createElement('h3'); legend.textContent = '分组方式'; menu.body.append(legend);
-  for (const [value, name] of [['date', '日期'], ['project', '项目'], ['status', '状态']] as const) {
+  for (const [value, name, glyph] of [['date', '日期', 'calendar'], ['project', '项目', 'folder'], ['status', '状态', 'activity']] as const) {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet';
-    button.setAttribute('role', 'menuitemradio'); button.setAttribute('aria-checked', String(grouping === value));
-    button.textContent = `${grouping === value ? '✓ ' : ''}${name}`;
+    setAction(button, glyph, name);
+    button.setAttribute('aria-pressed', String(grouping === value));
+    if (grouping === value) { const mark = document.createElement('span'); mark.className = 'menu-selection'; mark.setAttribute('aria-hidden', 'true'); mark.textContent = '✓'; button.append(mark); }
     button.addEventListener('click', () => { grouping = value; localStorage.setItem('codex-reach-grouping', value); renderInbox(); menu.dialog.close(); });
     menu.body.append(button);
   }
-  const archive = document.createElement('button'); archive.type = 'button'; archive.className = 'quiet'; archive.textContent = archivedList ? '查看当前对话' : '查看已归档对话';
+  menu.body.append(document.createElement('hr'));
+  const archive = document.createElement('button'); archive.type = 'button'; archive.className = 'quiet'; setAction(archive, 'archive', archivedList ? '查看当前对话' : '查看已归档对话');
   archive.addEventListener('click', () => { archivedList = !archivedList; threads = []; nextThreads = null; menu.dialog.close(); renderInbox(); void refreshInbox(); });
   menu.body.append(archive);
-  const notifications = document.createElement('button'); notifications.type = 'button'; notifications.className = 'quiet'; notifications.textContent = '任务提醒';
-  notifications.addEventListener('click', () => { menu.dialog.close(); if (client) openNotificationSettings(client); }); menu.body.append(notifications);
-  const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'quiet'; refresh.textContent = '刷新'; refresh.id = 'refresh-button'; refresh.disabled = inboxRefreshing;
+  const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'quiet'; setAction(refresh, 'refresh', '刷新'); refresh.id = 'refresh-button'; refresh.disabled = inboxRefreshing;
   refresh.addEventListener('click', () => { menu.dialog.close(); void refreshInbox(); }); menu.body.append(refresh);
-  const settings = document.createElement('button'); settings.type = 'button'; settings.className = 'quiet'; settings.textContent = '连接设置';
-  settings.addEventListener('click', () => { menu.dialog.close(); openSettings(); }); menu.body.append(settings);
+  menu.body.append(document.createElement('hr'));
+  const notifications = document.createElement('button'); notifications.type = 'button'; notifications.className = 'quiet'; setAction(notifications, 'bell', '任务提醒');
+  notifications.addEventListener('click', () => { menu.dialog.close(); if (client) openNotificationSettings(client); }); menu.body.append(notifications);
+  appendConnectionSettings(menu);
 });
 
 async function togglePin(id: string): Promise<void> {
@@ -590,6 +608,11 @@ function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
   const selectedProject = projects.find(project => project.id === projectId);
+  const scope = projectId === '__none__' ? '无项目' : selectedProject?.name || '全部对话';
+  const title = archivedList ? (projectId ? `归档 · ${scope}` : '已归档') : scope;
+  element('project-filter-label').textContent = title;
+  element('project-filter-button').setAttribute('aria-label', `筛选项目，当前：${title}`);
+  element('project-filter-button').title = selectedProject?.path ? `${title}\n${selectedProject.path}` : title;
   const visible = threads.filter(thread => {
     const project = threadProject(thread, projects);
     const matchesProject = !projectId || (projectId === '__none__'
@@ -598,9 +621,8 @@ function renderInbox(): void {
     return matchesProject && (!query || searchText.includes(query));
   });
   const fragment = document.createDocumentFragment();
-  element('list-scope').classList.toggle('sr-only', !query && !projectId && !archivedList);
-  const scope = projectId === '__none__' ? '无项目 · ' : selectedProject ? `${selectedProject.name} · ` : '';
-  element('list-scope').textContent = `${archivedList ? '已归档 · ' : ''}${scope}已加载 ${threads.length} 条${query || projectId ? ` · 匹配 ${visible.length} 条` : ''}`;
+  element('list-scope').classList.toggle('sr-only', !query && !projectId);
+  element('list-scope').textContent = `已加载 ${threads.length} 条${query || projectId ? ` · 匹配 ${visible.length} 条` : ''}`;
   for (const group of groupThreads(visible, projects, grouping)) {
     const heading = document.createElement('h2');
     heading.className = 'thread-group-title'; heading.textContent = group.title;

@@ -40,9 +40,8 @@
       </main>
       <main id="inbox-view" class="inbox-view" hidden>
         <div class="inbox-heading">
-          <h1>对话</h1>
+          <h1><button id="project-filter-button" class="quiet" type="button" aria-label="筛选项目，当前：全部对话" aria-haspopup="dialog" aria-expanded="false"><span id="project-filter-label">全部对话</span><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button></h1>
           <div class="refresh-controls">
-            <span class="connection-state" data-connection-status role="status"></span>
             <button id="search-button" class="quiet icon-button" type="button" aria-label="搜索对话和项目" aria-expanded="false"></button>
             <button id="list-menu-button" class="quiet icon-button" type="button" aria-label="对话列表菜单">⋯</button>
             <button id="new-chat-button" class="quiet icon-button" type="button" aria-label="新建对话"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
@@ -67,9 +66,6 @@
             <div class="chat-metadata"><p id="chat-meta"></p><span id="chat-state" class="state"></span></div>
           </div>
           <button id="chat-menu-button" class="quiet icon-button" type="button" aria-label="对话菜单">⋯</button>
-          <div class="header-actions">
-            <span class="connection-state" data-connection-status role="status"></span>
-          </div>
         </header>
         <div id="chat-error" role="status" hidden>
           <span id="chat-error-text"></span>

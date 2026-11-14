@@ -48,7 +48,7 @@ public class MobileUpgradeTest {
             AtomicReference<WebView> view = new AtomicReference<>();
             scenario.onActivity(activity -> view.set(activity.getBridge().getWebView()));
             WebView web = view.get();
-            await(web, "document.querySelector('#connect-button')?.disabled===false || document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'");
+            await(web, "document.querySelector('#connect-button')?.disabled===false || document.querySelector('.app-header [data-connection-status]').textContent==='已连接'");
             if (evaluate(web, "!localStorage.getItem('codex-reach-connection')").equals("true")) {
                 evaluate(web, "document.querySelector('#server-url').value='http://10.0.2.2:4320';document.querySelector('#server-key').value='fixture-access';document.querySelector('#connection-form').requestSubmit();null");
             }
@@ -133,7 +133,7 @@ public class MobileUpgradeTest {
         request("/control/mobile-reset", new JSONObject());
         context.getSystemService(NotificationManager.class).cancelAll();
         shell("pm grant " + context.getPackageName() + " android.permission.POST_NOTIFICATIONS");
-        evaluate(web, "document.querySelector(document.querySelector('#chat-view').hidden?'#list-menu-button':'#chat-menu-button').click(); [...document.querySelectorAll('.menu-actions button')].find(button=>button.textContent==='连接设置').click();document.querySelector('#notification-settings').click();null");
+        evaluate(web, "document.querySelector(document.querySelector('#chat-view').hidden?'#list-menu-button':'#chat-menu-button').click(); document.querySelector('.menu-connection').click();document.querySelector('#notification-settings').click();null");
         await(web, "Boolean(document.querySelector('.notification-options'))");
         evaluate(web, "document.querySelector('.notification-options input[name=enabled]').checked=true;document.querySelector('.notification-options').requestSubmit();null");
         awaitCondition(() -> NotificationsPlugin.preferences(context).contains("cursor:android-fixture") && NotificationService.running, "notification connection established");

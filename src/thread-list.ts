@@ -25,12 +25,12 @@ export function groupThreads(threads: Thread[], projects: Project[], grouping: G
   const groups = new Map<string, { title: string; rank: string; threads: Thread[] }>();
   for (const thread of threads) {
     const project = threadProject(thread, projects);
-    const projectPath = directoryKey(project?.path || thread.cwd);
+    const projectPath = project ? directoryKey(project.path) : '';
     let title: string;
     let rank: string;
     if (thread.pinned) { title = '置顶'; rank = '0'; }
     else if (grouping === 'project') {
-      title = project?.name || thread.cwd.replace(/[/\\]$/, '').split(/[/\\]/).at(-1) || '独立目录';
+      title = project?.name || '无项目';
       rank = `1:${title}`;
     } else if (grouping === 'status') {
       if (['failed', 'systemError'].includes(thread.status)) { title = '异常'; rank = '1'; }
@@ -43,7 +43,7 @@ export function groupThreads(threads: Thread[], projects: Project[], grouping: G
       title = date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
       rank = `1:${String(9999999999 - new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime() / 1000).padStart(10, '0')}`;
     }
-    const key = thread.pinned ? 'pinned' : grouping === 'project' ? `project:${projectPath || thread.projectId}` : title;
+    const key = thread.pinned ? 'pinned' : grouping === 'project' ? `project:${projectPath}` : title;
     let group = groups.get(key);
     if (!group) { group = { title, rank, threads: [] }; groups.set(key, group); }
     group.threads.push(thread);
