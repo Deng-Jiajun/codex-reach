@@ -68,7 +68,7 @@ public class OrganizationFlowTest {
             evaluate(webView, "document.querySelector('#back-button').click(); null");
         }
         String row = "document.querySelector('[data-thread-id=\"" + id + "\"]')";
-        await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled && Boolean(" + row + ")");
+        await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(" + row + ")");
         evaluate(webView, row + ".click(); null");
         await(webView, "!document.querySelector('#chat-view').hidden && document.querySelector('#chat-title').textContent===" + JSONObject.quote(title) + " && document.querySelector('#messages').textContent.includes('QUOTE_SOURCE_LINE') && document.querySelector('#chat-state').dataset.status==='idle' && document.querySelector('#chat-state').hidden");
     }
@@ -91,7 +91,7 @@ public class OrganizationFlowTest {
         clickNamedButton(webView, "document.querySelector('.menu-actions')", "置顶");
         await(webView, "!document.querySelector('#chat-pinned').hidden && !document.querySelector('.menu-dialog')");
         evaluate(webView, "document.querySelector('#back-button').click(); null");
-        await(webView, "!document.querySelector('#refresh-button').disabled && Boolean(document.querySelector('[data-thread-id=fixture-organization] .static-pin'))");
+        await(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(document.querySelector('[data-thread-id=fixture-organization] .static-pin'))");
         pressElement(webView, "[data-thread-id=fixture-organization]", true);
         await(webView, "Boolean(document.querySelector('.menu-dialog'))");
         clickNamedButton(webView, "document.querySelector('.menu-actions')", "取消置顶");
@@ -249,7 +249,10 @@ public class OrganizationFlowTest {
         await(webView, "document.querySelector('#delivery-note').hidden && document.querySelector('#selected-files').hidden && document.querySelector('#messages').textContent.includes('ORGANIZATION_ATTACHMENTS_OK')");
         assertComposer(webView, "附件发送期间的新草稿");
         assertEquals("true", evaluate(webView, "document.querySelector('#selected-annotations').hidden && document.querySelectorAll('#messages article.user .annotation-card').length===1 && !document.querySelector('#messages').textContent.includes('<response-annotations>')"));
-        assertEquals("true", evaluate(webView, "[...document.querySelectorAll('#messages article.user')].at(-1).querySelectorAll('.attachment-chip').length===4"));
+        assertEquals("true", evaluate(webView, "[...document.querySelectorAll('#messages article.user')].at(-1).querySelectorAll('.attachment-chip').length===2 && Boolean(document.querySelector('#messages .attachment-more'))"));
+        evaluate(webView, "document.querySelector('#messages .attachment-more').click();null");
+        await(webView, "document.querySelectorAll('.attachment-manager .attachment-chip').length===4");
+        evaluate(webView, "document.querySelector('.attachment-manager .dialog-close').click();null");
         assertEquals(1, stats().getInt("sendPosts"));
         assertEquals(1, stats().getInt("sendCount"));
 

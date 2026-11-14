@@ -35,8 +35,8 @@ export function openContextPicker(client: ReachClient, scope: { chatId?: string;
   function renderThreads(): void {
     results.replaceChildren();
     const query = search.value.toLocaleLowerCase();
-    for (const thread of threads.filter(thread => `${threadTitle(thread)} ${thread.cwd}`.toLocaleLowerCase().includes(query))) {
-      row(threadTitle(thread), thread.cwd, () => onSelect({ kind: 'thread', value: { id: thread.id, title: threadTitle(thread) } }));
+    for (const thread of threads.filter(thread => `${thread.title} ${thread.cwd}`.toLocaleLowerCase().includes(query))) {
+      row(threadTitle(thread), thread.cwd, () => onSelect({ kind: 'thread', value: { id: thread.id, title: thread.title } }));
     }
     status.textContent = `搜索已读取的 ${threads.length} 个对话${cursor ? '，可继续读取' : ''}`;
     more.hidden = !cursor;

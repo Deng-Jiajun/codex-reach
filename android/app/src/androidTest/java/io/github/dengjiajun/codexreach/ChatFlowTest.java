@@ -36,9 +36,9 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#notice').textContent.includes('访问密钥无效') && !document.querySelector('#connect-button').disabled");
                 evaluate(webView, "document.querySelector('#server-key').value='fixture-access'; document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "!document.querySelector('#inbox-view').hidden && Boolean(document.querySelector('[data-thread-id=\"fixture-chat\"]'))");
-                evaluate(webView, "document.querySelector('#refresh-button').click(); null");
-                assertEquals("true", evaluate(webView, "document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-button').getAttribute('aria-busy')==='true' && getComputedStyle(document.querySelector('#refresh-button svg')).animationName==='refresh-spin'"));
-                await(webView, "!document.querySelector('#refresh-button').disabled && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
+                evaluate(webView, "document.querySelector('#list-menu-button').click(); document.querySelector('#refresh-button').click(); null");
+                assertEquals("true", evaluate(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')==='true' && getComputedStyle(document.querySelector('#refresh-indicator svg')).animationName==='refresh-spin'"));
+                await(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
                 await(webView, "document.querySelector('#messages').textContent.includes('连接已准备就绪')");
                 assertEquals("true", evaluate(webView, "document.querySelector('#chat-title').textContent==='连接与缓存验证' && document.querySelector('.app-header').hidden"));
@@ -46,7 +46,7 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#delivery-note').hidden");
                 assertEquals("true", evaluate(webView, "!window.fixtureScriptExecuted && Boolean(document.querySelector('#messages table')) && Boolean(document.querySelector('#messages pre'))"));
                 evaluate(webView, "document.querySelector('#message-input').value='保留的手机草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); null");
-                evaluate(webView, "document.querySelector('#messages-scroll').scrollTop=10; window.savedScrollTop=document.querySelector('#messages-scroll').scrollTop; document.querySelector('#chat-settings-button').click(); null");
+                evaluate(webView, "document.querySelector('#messages-scroll').scrollTop=10; window.savedScrollTop=document.querySelector('#messages-scroll').scrollTop; document.querySelector('#chat-menu-button').click(); [...document.querySelectorAll('.menu-actions button')].find(button=>button.textContent==='连接设置').click(); null");
                 await(webView, "!document.querySelector('#connection-view').hidden && !document.querySelector('#cancel-settings').hidden");
                 assertEquals("true", evaluate(webView, "Boolean(document.querySelector('.app-header #cancel-settings svg')) && document.querySelector('#cancel-settings').getBoundingClientRect().left<60"));
                 evaluate(webView, "document.querySelector('#server-key').value='wrong-key'; document.querySelector('#connection-form').requestSubmit(); null");
@@ -56,13 +56,13 @@ public class ChatFlowTest {
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
                 assertEquals("Reading position " + evaluate(webView, "JSON.stringify({saved:window.savedScrollTop,actual:document.querySelector('#messages-scroll').scrollTop})"),
                     "true", evaluate(webView, "Math.abs(document.querySelector('#messages-scroll').scrollTop-window.savedScrollTop)<2"));
-                evaluate(webView, "document.querySelector('#chat-settings-button').click(); document.querySelector('#connection-form').requestSubmit(); null");
+                evaluate(webView, "document.querySelector('#chat-menu-button').click(); [...document.querySelectorAll('.menu-actions button')].find(button=>button.textContent==='连接设置').click(); document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "!document.querySelector('#chat-view').hidden");
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
 
                 control("offline");
                 await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('#chat-view [data-connection-status]').textContent==='重连中'");
-                evaluate(webView, "document.querySelector('#chat-settings-button').click(); null");
+                evaluate(webView, "document.querySelector('#chat-menu-button').click(); [...document.querySelectorAll('.menu-actions button')].find(button=>button.textContent==='连接设置').click(); null");
                 InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
                 await(webView, "!document.querySelector('#chat-view').hidden");
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
@@ -71,16 +71,16 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#messages').textContent.includes('REACH_RECONNECTED')");
 
                 evaluate(webView, "document.querySelector('#back-button').click(); null");
-                await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
+                await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true'");
                 control("offline");
-                evaluate(webView, "document.querySelector('#refresh-button').click(); null");
+                evaluate(webView, "document.querySelector('#list-menu-button').click(); document.querySelector('#refresh-button').click(); null");
                 await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('#refresh-status').textContent==='刷新失败'");
                 control("online");
                 await(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#refresh-status').textContent.startsWith('已刷新')");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
                 await(webView, "document.querySelector('#chat-state').dataset.status==='idle' && document.querySelector('#chat-state').hidden && document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
                 evaluate(webView, "document.querySelector('#back-button').click(); null");
-                await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
+                await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true'");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-error\"]').click(); null");
                 await(webView, "!document.querySelector('#chat-error').hidden");
                 assertEquals("true", evaluate(webView, "document.querySelector('#reconnect-notice').hidden && document.querySelector('#chat-view [data-connection-status]').textContent==='已连接'"));
@@ -88,7 +88,7 @@ public class ChatFlowTest {
                 evaluate(webView, "document.querySelector('#retry-history').click(); null");
                 await(webView, "document.querySelector('#chat-error').hidden && document.querySelector('#messages').textContent.includes('READ_ERROR_RECOVERED')");
                 evaluate(webView, "document.querySelector('#back-button').click(); null");
-                await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled");
+                await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true'");
                 evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-chat\"]').click(); null");
                 await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK')");
                 SystemClock.sleep(1200);

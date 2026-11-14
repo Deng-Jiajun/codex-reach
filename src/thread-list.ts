@@ -14,8 +14,11 @@ export function threadProject(thread: Thread, projects: Project[]): Project | un
 }
 
 export function threadTitle(thread: Pick<Thread, 'id' | 'title'>): string {
-  return !thread.title || thread.title === thread.id || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(thread.title)
-    ? '未命名对话' : thread.title;
+  const title = thread.title?.replace(/\s+/g, ' ').trim();
+  if (!title || title === thread.id || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(title)) return '未命名对话';
+  // Unnamed desktop threads may use the entire first message as their list title
+  const characters = Array.from(title);
+  return characters.length > 60 ? characters.slice(0, 60).join('') + '…' : title;
 }
 
 export function groupThreads(threads: Thread[], projects: Project[], grouping: Grouping): { title: string; threads: Thread[] }[] {

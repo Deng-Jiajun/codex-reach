@@ -20,6 +20,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.ImageView;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -36,7 +37,7 @@ public class ReaderActivity extends Activity {
     private String name;
     private LinearLayout root;
     private TextView status;
-    private Button expand;
+    private ImageButton expand;
     private WebView web;
     private PdfRenderer pdf;
     private File pdfFile;
@@ -63,6 +64,17 @@ public class ReaderActivity extends Activity {
 
     private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
 
+    private ImageButton iconButton(int icon, String label, Runnable action) {
+        ImageButton button = new ImageButton(this, null, android.R.attr.borderlessButtonStyle);
+        button.setImageResource(icon);
+        button.setContentDescription(label);
+        button.setTooltipText(label);
+        button.setPadding(dp(12), dp(12), dp(12), dp(12));
+        button.setLayoutParams(new LinearLayout.LayoutParams(dp(48), dp(48)));
+        button.setOnClickListener(view -> action.run());
+        return button;
+    }
+
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         url = getIntent().getStringExtra("url");
@@ -73,25 +85,27 @@ public class ReaderActivity extends Activity {
         root.setFitsSystemWindows(true);
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setBackgroundColor(Color.rgb(247, 248, 245));
         TextView title = new TextView(this);
         title.setText(name);
         title.setSingleLine(true);
+        title.setTextSize(16);
+        title.setTextColor(Color.rgb(38, 57, 42));
         title.setEllipsize(android.text.TextUtils.TruncateAt.END);
         title.setPadding(dp(12), 0, 0, 0);
-        header.addView(button("关闭", this::finish));
         header.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
-        expand = button("展开", () -> { full = !full; resize(); });
-        header.addView(expand);
-        Button more = button("⋯", () -> {});
-        more.setContentDescription("阅读操作");
+        expand = iconButton(R.drawable.reader_expand, "展开阅读面板", () -> { full = !full; resize(); });
+        ImageButton more = iconButton(R.drawable.reader_more, "阅读操作", () -> {});
         more.setOnClickListener(view -> {
             PopupMenu menu = new PopupMenu(this, more);
-            menu.getMenu().add("重新读取").setOnMenuItemClickListener(item -> { if (web != null) web.reload(); else if (pdf == null) loadPdf(); else renderPage(pageIndex); return true; });
+            menu.getMenu().add("重新读取").setOnMenuItemClickListener(item -> { if (web != null) web.reload(); else loadPdf(); return true; });
             if (getIntent().getBooleanExtra("savable", false)) menu.getMenu().add("保存到手机").setOnMenuItemClickListener(item -> { save(); return true; });
             else menu.getMenu().add("在浏览器打开").setOnMenuItemClickListener(item -> { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(web == null ? url : web.getUrl()))); return true; });
             menu.show();
         });
         header.addView(more);
+        header.addView(expand);
+        header.addView(iconButton(R.drawable.reader_close, "关闭", this::finish));
         header.setOnTouchListener((view, event) -> {
             if (event.getAction() == MotionEvent.ACTION_DOWN) { gestureStart = event.getRawY(); return true; }
             if (event.getAction() == MotionEvent.ACTION_UP) {
@@ -117,7 +131,9 @@ public class ReaderActivity extends Activity {
         int height = getWindowManager().getMaximumWindowMetrics().getBounds().height();
         getWindow().setGravity(Gravity.BOTTOM);
         getWindow().setLayout(ViewGroup.LayoutParams.MATCH_PARENT, full ? ViewGroup.LayoutParams.MATCH_PARENT : height / 2);
-        expand.setText(full ? "收起" : "展开");
+        expand.setImageResource(full ? R.drawable.reader_collapse : R.drawable.reader_expand);
+        expand.setContentDescription(full ? "收起阅读面板" : "展开阅读面板");
+        expand.setTooltipText(full ? "收起阅读面板" : "展开阅读面板");
     }
 
     @Override public void onConfigurationChanged(Configuration configuration) { super.onConfigurationChanged(configuration); resize(); }
@@ -179,22 +195,39 @@ public class ReaderActivity extends Activity {
     private void loadPdf() {
         if (pdfLoading || closed) return;
         pdfLoading = true;
+        int requestedPage = pageIndex;
+        previous.setEnabled(false);
+        next.setEnabled(false);
         status.setVisibility(View.VISIBLE);
         status.setText("正在下载 PDF…");
         worker.execute(() -> {
+            File downloaded = null;
             try {
-                if (pdfFile != null) pdfFile.delete();
-                pdfFile = File.createTempFile("reader-", ".pdf", getCacheDir());
-                try (FileOutputStream output = new FileOutputStream(pdfFile)) { ReaderPlugin.download(url, output); }
+                downloaded = File.createTempFile("reader-", ".pdf", getCacheDir());
+                try (FileOutputStream output = new FileOutputStream(downloaded)) { ReaderPlugin.download(url, output); }
                 if (closed) return;
-                pdf = new PdfRenderer(ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY));
-                runOnUiThread(() -> { if (!closed) renderPage(0); });
-            } catch (Exception error) { runOnUiThread(() -> status.setText("PDF 读取失败，" + error.getMessage())); }
-            finally { runOnUiThread(() -> pdfLoading = false); }
+                PdfRenderer replacement = new PdfRenderer(ParcelFileDescriptor.open(downloaded, ParcelFileDescriptor.MODE_READ_ONLY));
+                if (pdf != null) pdf.close();
+                if (pdfFile != null) pdfFile.delete();
+                pdf = replacement;
+                pdfFile = downloaded;
+                downloaded = null;
+                int index = Math.min(requestedPage, pdf.getPageCount() - 1);
+                runOnUiThread(() -> { pdfLoading = false; if (!closed) renderPage(index); });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    pdfLoading = false;
+                    if (closed) return;
+                    status.setText("PDF 读取失败，" + error.getMessage());
+                    previous.setEnabled(pdf != null && pageIndex > 0);
+                    next.setEnabled(pdf != null && pageIndex + 1 < pdf.getPageCount());
+                });
+            } finally { if (downloaded != null) downloaded.delete(); }
         });
     }
 
     private void renderPage(int index) {
+        if (pdfLoading || closed) return;
         previous.setEnabled(false);
         next.setEnabled(false);
         status.setText("正在读取页面…");
@@ -212,7 +245,7 @@ public class ReaderActivity extends Activity {
                 }
                 int count = pdf.getPageCount();
                 runOnUiThread(() -> {
-                    if (closed) { rendered.recycle(); return; }
+                    if (closed || pdfLoading) { rendered.recycle(); return; }
                     picture.setImageBitmap(rendered);
                     if (bitmap != null) bitmap.recycle();
                     bitmap = rendered;
@@ -221,7 +254,7 @@ public class ReaderActivity extends Activity {
                     previous.setEnabled(index > 0);
                     next.setEnabled(index + 1 < count);
                 });
-            } catch (Exception error) { runOnUiThread(() -> status.setText("页面读取失败，" + error.getMessage())); }
+            } catch (Exception error) { runOnUiThread(() -> { if (!closed && !pdfLoading) status.setText("页面读取失败，" + error.getMessage()); }); }
         });
     }
 

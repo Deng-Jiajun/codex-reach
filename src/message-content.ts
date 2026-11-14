@@ -4,6 +4,7 @@ import type { ResponseAnnotation } from './types';
 import type { ReachClient } from './api';
 import { loadImage, openPreview } from './files';
 import { openReader } from './reader';
+import { readerPath } from './reader-path';
 import { setIcon } from './ui';
 
 // Source offsets use rendered UTF-16 text, excluding controls injected by Reach
@@ -123,16 +124,14 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
   // Remove image sources while detached so local paths never become unauthenticated requests
   for (const picture of template.content.querySelectorAll('img')) {
     const index = Number(picture.getAttribute('src')?.split('/').at(-1));
-    let address = imageSources[index] ?? '';
-    try { address = decodeURI(address); } catch { /* A literal percent is valid in a local filename */ }
-    if (root && !/^(?:[a-z]+:|[/\\])/i.test(address)) address = `${root}/${address}`;
+    const address = imageSources[index] ?? '';
     picture.removeAttribute('src');
     picture.referrerPolicy = 'no-referrer';
     picture.loading = 'lazy';
     picture.className = 'answer-image';
     const attachment = /^(?:https?:|data:)/i.test(address)
       ? { name: picture.alt, image: true, directory: false, url: address }
-      : { name: picture.alt, image: true, directory: false, path: address.replace(/^file:\/\/\/?/i, '') };
+      : { name: picture.alt, image: true, directory: false, path: readerPath(address, root).path };
     const wrapper = document.createElement('span');
     wrapper.className = 'answer-image-frame';
     const retry = document.createElement('button');

@@ -12,6 +12,7 @@ grants = {}
 events = []
 queues = {}
 event_reads = 0
+pdf_reads = 0
 
 
 def pdf_bytes():
@@ -59,10 +60,10 @@ def file_bytes(organization, source, fallback):
 
 
 def get(handler, url, organization, files, png):
-    global event_reads
+    global event_reads, pdf_reads
     path = url.path
     if path == "/control/mobile-stats":
-        handler.reply({"eventReads": event_reads, "events": events, "queues": queues})
+        handler.reply({"eventReads": event_reads, "pdfReads": pdf_reads, "events": events, "queues": queues})
     elif path.startswith("/reader/"):
         parts = path.split("/", 3)
         name = unquote(parts[-1])
@@ -72,6 +73,7 @@ def get(handler, url, organization, files, png):
         elif name.endswith(".html"):
             binary(handler, b'<html><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css"></head><body><h1>READER_HTML</h1><img src="image.png"><button onclick="document.querySelector(\'#result\').textContent=\'READER_SCRIPT_OK\'">Run</button><p id="result"></p><p><a id="next-page" href="next.html">Next page</a></p><script>window.bridgePresent=!!window.Capacitor</script></body></html>', "text/html; charset=utf-8")
         elif name.endswith(".pdf"):
+            pdf_reads += 1
             binary(handler, pdf_bytes(), "application/pdf")
         elif name.endswith(".png"):
             binary(handler, file_bytes(organization, source, png), "image/png")

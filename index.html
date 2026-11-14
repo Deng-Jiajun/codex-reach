@@ -15,7 +15,6 @@
         </div>
         <div class="header-actions">
           <span class="connection-state" data-connection-status role="status"></span>
-          <button id="settings-button" class="quiet icon-button" type="button" aria-label="连接设置"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2a8 8 0 0 0-1.5.9L5.3 5.4 3 9.4l1.5 1.5a8 8 0 0 0 0 2.2L3 14.6l2.3 4 2.1-.5a8 8 0 0 0 1.5.9l.6 2h5l.6-2a8 8 0 0 0 1.5-.9l2.1.5 2.3-4-1.5-1.5a8 8 0 0 0 0-2.2L21 9.4l-2.3-4-2.1.5a8 8 0 0 0-1.5-.9L14.5 3Z"/><circle cx="12" cy="12" r="3"/></svg></button>
         </div>
       </header>
       <p id="notice" role="status" aria-live="polite" hidden></p>
@@ -43,13 +42,14 @@
         <div class="inbox-heading">
           <h1>对话</h1>
           <div class="refresh-controls">
+            <span class="connection-state" data-connection-status role="status"></span>
             <button id="search-button" class="quiet icon-button" type="button" aria-label="搜索对话和项目" aria-expanded="false"></button>
             <button id="list-menu-button" class="quiet icon-button" type="button" aria-label="对话列表菜单">⋯</button>
             <button id="new-chat-button" class="quiet icon-button" type="button" aria-label="新建对话"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
-            <span id="refresh-status" class="sr-only" role="status" aria-live="polite"></span>
-            <button id="refresh-button" class="quiet icon-button" type="button" aria-label="刷新"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8.3 8.3 0 0 1 20 12M4 12a8.3 8.3 0 0 0 13.9 5.9"/></svg></button>
           </div>
         </div>
+        <div id="refresh-indicator" class="refresh-indicator" aria-hidden="true"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 6.1A8.3 8.3 0 0 1 20 12M4 12a8.3 8.3 0 0 0 13.9 5.9"/></svg><span id="refresh-hint">下拉刷新</span></div>
+        <span id="refresh-status" class="sr-only" role="status" aria-live="polite"></span>
         <div id="list-search" class="filters" hidden>
           <label class="sr-only" for="thread-search">搜索已加载的对话</label>
           <input id="thread-search" type="search" placeholder="搜索已加载的对话或项目" />
@@ -69,7 +69,6 @@
           <button id="chat-menu-button" class="quiet icon-button" type="button" aria-label="对话菜单">⋯</button>
           <div class="header-actions">
             <span class="connection-state" data-connection-status role="status"></span>
-            <button id="chat-settings-button" class="quiet icon-button" type="button" aria-label="连接设置"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 3-.6 2a8 8 0 0 0-1.5.9L5.3 5.4 3 9.4l1.5 1.5a8 8 0 0 0 0 2.2L3 14.6l2.3 4 2.1-.5a8 8 0 0 0 1.5.9l.6 2h5l.6-2a8 8 0 0 0 1.5-.9l2.1.5 2.3-4-1.5-1.5a8 8 0 0 0 0-2.2L21 9.4l-2.3-4-2.1.5a8 8 0 0 0-1.5-.9L14.5 3Z"/><circle cx="12" cy="12" r="3"/></svg></button>
           </div>
         </header>
         <div id="chat-error" role="status" hidden>
@@ -89,8 +88,10 @@
         </div>
         <div class="composer-area">
           <div id="selected-skills" class="selected-skills" hidden></div>
-          <button id="manage-files" class="quiet" type="button" hidden>附件</button>
-          <div id="selected-files" hidden></div>
+          <div class="draft-attachments">
+            <div id="selected-files" hidden></div>
+            <button id="manage-files" class="quiet attachment-count" type="button" hidden>附件</button>
+          </div>
           <div id="selected-annotations" class="selected-annotations" hidden></div>
           <button id="open-attachment-chat" class="quiet" type="button" hidden>在电脑端打开对话以发送附件</button>
           <div id="interaction-note" class="delivery-note" hidden><p id="interaction-status" role="status"></p><button id="resolve-interaction" class="quiet" type="button" hidden>已核对，恢复操作</button></div>
@@ -103,13 +104,12 @@
             <div class="composer-input">
             <label class="sr-only" for="message-input">消息</label>
             <textarea id="message-input" rows="1" placeholder="发送消息，@ 引用" spellcheck="false"></textarea>
-            <button id="expand-input" class="quiet" type="button" aria-expanded="false" aria-label="展开输入框"></button>
+            <button id="expand-input" class="quiet" type="button" aria-expanded="false" aria-label="展开输入框" hidden></button>
             </div>
             <div class="composer-tools">
             <button id="files-button" class="quiet" type="button" aria-label="添加内容"></button>
             <button id="parameters-button" class="quiet" type="button">沿用会话参数</button>
             <button id="queue-button" type="button" class="quiet" aria-label="待发队列" hidden></button>
-            <button id="stop-button" class="quiet icon-button stop" type="button" aria-label="停止任务" hidden><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg></button>
             <button id="send-mode-button" class="quiet" type="button" aria-label="选择发送方式" aria-haspopup="dialog" hidden></button>
             <button id="send-button" class="send" type="submit">发送</button>
             </div>
@@ -128,11 +128,11 @@
             <label>项目<select id="new-chat-project"></select></label>
             <p id="new-chat-path" class="field-note"></p>
             <div id="new-references" class="selected-skills" hidden></div>
-            <button id="new-manage-files" class="quiet" type="button" hidden>附件</button><div id="new-selected-files" class="attachment-list composer-attachments"></div>
+            <div class="draft-attachments"><div id="new-selected-files" class="attachment-list composer-attachments" hidden></div><button id="new-manage-files" class="quiet attachment-count" type="button" hidden>附件</button></div>
             <div class="composer">
               <div class="composer-input">
-                <label class="sr-only" for="new-chat-prompt">首条消息</label><textarea id="new-chat-prompt" rows="2" placeholder="输入任务，@ 引用"></textarea>
-                <button id="new-expand-input" class="quiet" type="button" aria-expanded="false" aria-label="展开输入框"></button>
+                <label class="sr-only" for="new-chat-prompt">首条消息</label><textarea id="new-chat-prompt" rows="1" placeholder="输入任务，@ 引用"></textarea>
+                <button id="new-expand-input" class="quiet" type="button" aria-expanded="false" aria-label="展开输入框" hidden></button>
               </div>
               <div class="composer-tools">
                 <button id="new-files-button" class="quiet" type="button" aria-label="添加内容"></button>

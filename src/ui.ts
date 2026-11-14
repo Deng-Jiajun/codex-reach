@@ -7,6 +7,7 @@ const paths = {
   expand: '<path d="M14 3h7v7M21 3l-7 7M10 21H3v-7M3 21l7-7"/>',
   collapse: '<path d="M21 3l-7 7m0-7v7h7M3 21l7-7m-7 0h7v7"/>',
   send: '<path d="M12 20V4m-7 7 7-7 7 7"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/>',
   down: '<path d="M12 4v16m-7-7 7 7 7-7"/>',
   chevron: '<path d="m6 9 6 6 6-6"/>',
   queue: '<path d="M4 5h16M4 11h10M4 17h8m5-3 4 3-4 3Z"/>',
@@ -15,6 +16,9 @@ const paths = {
   unread: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 6 9 7 9-7"/>',
   archive: '<path d="M4 8v13h16V8M9 12h6"/><rect x="2" y="3" width="20" height="5" rx="1"/>',
   file: '<path d="M14 2H5v20h14V7Zm0 0v5h5M8 12h8M8 16h6"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8" cy="8" r="1.5"/><path d="m3 17 5-5 4 4 4-6 5 7"/>',
+  folder: '<path d="M3 7V4h6l2 3h10v13H3Z"/>',
+  more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   trash: '<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
 } as const;
 
@@ -38,7 +42,29 @@ export function setAction(button: HTMLButtonElement, name: Icon, label: string):
   button.classList.add('menu-action');
 }
 
+export function resizeComposer(input: HTMLTextAreaElement, toggle: HTMLElement): void {
+  if (!input.clientWidth) return;
+  input.style.height = 'auto';
+  const overflow = input.scrollHeight > 160;
+  const expanded = overflow && toggle.getAttribute('aria-expanded') === 'true';
+  toggle.hidden = !overflow;
+  toggle.setAttribute('aria-expanded', String(expanded));
+  setIcon(toggle, expanded ? 'collapse' : 'expand', expanded ? '收起输入框' : '展开输入框');
+  input.closest('.composer')?.classList.toggle('expanded', expanded);
+  const limit = expanded ? Math.max(160, (window.visualViewport?.height ?? innerHeight) * .5) : 160;
+  input.style.height = `${Math.min(limit, input.scrollHeight)}px`;
+}
+
 const prepared = new WeakSet<HTMLDialogElement>();
+const openDialogs = new Set<HTMLDialogElement>();
+
+export function closeTopDialog(): boolean {
+  const dialog = [...openDialogs].reverse().find(dialog => dialog.open && dialog.isConnected);
+  if (!dialog) return false;
+  dialog.close();
+  return true;
+}
+
 export function showDialog(dialog: HTMLDialogElement): void {
   if (!prepared.has(dialog)) {
     prepared.add(dialog);
@@ -67,6 +93,11 @@ export function showDialog(dialog: HTMLDialogElement): void {
       outside = false;
     });
     dialog.addEventListener('pointercancel', () => { outside = false; });
+    dialog.addEventListener('close', () => { if (!dialog.open) openDialogs.delete(dialog); });
   }
-  dialog.showModal();
+  if (!dialog.open) {
+    dialog.showModal();
+    openDialogs.delete(dialog);
+    openDialogs.add(dialog);
+  }
 }

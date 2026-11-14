@@ -59,7 +59,7 @@ public class InteractionFlowTest {
 
     private void openInteractionChat(WebView webView) throws Exception {
         evaluate(webView, "document.querySelector('#back-button').click(); null");
-        await(webView, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled && Boolean(document.querySelector('[data-thread-id=\"fixture-interactions\"]'))");
+        await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(document.querySelector('[data-thread-id=\"fixture-interactions\"]'))");
         evaluate(webView, "document.querySelector('[data-thread-id=\"fixture-interactions\"]').click(); null");
         await(webView, "document.querySelector('#chat-title').textContent==='审批与问答验证' && document.querySelector('#messages').textContent.includes('INTERACTION_USER')");
     }
@@ -153,6 +153,10 @@ public class InteractionFlowTest {
         String sync = requestCard("sync-input");
         await(webView, "Boolean(" + sync + ") && document.querySelectorAll('.async-questions .request-card').length===2");
         setComposer(webView, "保留的普通草稿");
+        evaluate(webView, asyncCard(0) + ".querySelector('textarea').focus(); null");
+        assertEquals("true", evaluate(webView, asyncCard(0) + ".querySelector('input[value=custom]').checked && !" + asyncCard(0) + ".querySelector('textarea').matches(':disabled')"));
+        evaluate(webView, asyncCard(0) + ".querySelector('input[type=radio]').click(); null");
+        assertEquals("false", evaluate(webView, asyncCard(0) + ".querySelector('textarea').required"));
         evaluate(webView, "(()=>{const groups=" + sync + ".querySelectorAll('.request-question'); groups[0].querySelector('input[type=radio]').click(); window.fixtureQuestionDraft=groups[1].querySelector('textarea'); window.fixtureQuestionDraft.value='SYNC_DRAFT_RETAINED'; window.fixtureQuestionDraft.dispatchEvent(new Event('input',{bubbles:true})); window.fixtureQuestionDraft.focus(); return null})()");
         control("interaction-pulse");
         await(webView, "document.querySelector('#messages').textContent.includes('INTERACTION_PULSE_2')");

@@ -24,6 +24,14 @@ test('status grouping uses explicit waiting evidence and hides idle labels', () 
   assert.equal(threadTitle(chat('a', 0, { title: '已有标题' })), '已有标题');
 });
 
+test('preview titles stay bounded without changing stored names or splitting Unicode characters', () => {
+  const thread = chat('long', 0, { title: '😀'.repeat(80) + '\n完整首条消息' });
+  assert.equal(threadTitle(thread), '😀'.repeat(60) + '…');
+  assert.ok(thread.title.endsWith('\n完整首条消息'));
+  assert.equal(threadTitle(chat('a', 0, { title: '  原有标题\n第二行  ' })), '原有标题 第二行');
+  assert.equal(threadTitle(chat('a', 0, { title: ' \n ' })), '未命名对话');
+});
+
 test('project identity and Windows directory spelling share one project group', () => {
   const groups = groupThreads([
     chat('with-project', 1, { projectId: 'pc', cwd: 'D:\\Projects\\pc' }),

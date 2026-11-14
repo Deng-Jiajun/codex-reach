@@ -102,7 +102,7 @@ export function openChanges(client: ReachClient, threadId: string, cwd: string):
           const detail = document.createElement('p'); detail.className = 'field-note';
           detail.textContent = `轮次 ${group.turnId} · ${{ completed: '已执行', failed: '执行失败', declined: '未批准', inProgress: '执行中' }[group.status] ?? group.status}${change.kind.move_path ? ` · 移动到 ${change.kind.move_path}` : ''}`;
           const open = document.createElement('button'); open.type = 'button'; open.className = 'quiet'; open.textContent = '打开当前文件';
-          open.addEventListener('click', () => void openReader(change.kind.move_path ?? change.path, client, cwd));
+          open.addEventListener('click', () => void openReader({ path: change.kind.move_path ?? change.path }, client, cwd));
           const diff = document.createElement('pre'); diff.className = 'change-diff';
           if (change.diff) for (const line of change.diff.split('\n')) {
             const span = document.createElement('span'); span.textContent = line + '\n';

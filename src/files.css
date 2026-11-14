@@ -1,7 +1,7 @@
 .files-dialog .files-controls { gap: 12px; }
 .files-dialog .files-path-form { gap: 8px; }
 .files-path-actions, .files-navigation { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.files-path-actions > button { flex: 1; min-height: 40px; }
+.files-path-actions > button { flex: 1; min-height: 48px; }
 .files-navigation { justify-content: space-between; }
 .files-navigation .quiet { padding: 5px 8px; font-size: 13px; }
 .files-list { max-height: min(36dvh, 340px); overflow-y: auto; border-top: 1px solid #dce2d7; border-bottom: 1px solid #dce2d7; overscroll-behavior: contain; }
@@ -14,9 +14,21 @@
 .files-upload input { font-size: 13px; padding: 8px; }
 .files-status { margin-top: 12px; white-space: pre-wrap; }
 .attachments { display: flex; flex-wrap: wrap; gap: 7px; min-width: 0; max-width: 100%; margin: 8px 0; }
-.attachment-chip { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 8px; max-width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid #cbd8c8; border-radius: 9px; background: #e8eee5; color: #395542; font-size: 12px; }
-.attachment-name, .attachment-image-button { grid-column: 1; grid-row: 1; min-width: 0; overflow-wrap: anywhere; text-align: left; }
-.attachment-image-button { border: 0; border-radius: 4px; padding: 3px 0; background: transparent; color: #336e50; text-decoration: underline; font-size: 13px; }
+.attachment-chip { display: flex; align-items: center; max-width: 100%; min-width: 0; padding: 0 4px; border: 1px solid #d8e1d4; border-radius: 12px; background: #edf1ea; color: #395542; font-size: 12px; }
+.attachment-name, .attachment-image-button { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; min-height: 48px; text-align: left; }
+.attachment-image-button { border: 0; border-radius: 8px; padding: 4px; background: transparent; color: inherit; font-size: 12px; }
+.attachment-label { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.attachment-name > .icon { flex-shrink: 0; }
+.attachment-chip .attachment-details { display: none; }
+.attachment-manager .attachment-details { display: inline-flex; }
+.message-attachments { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: min(100%, 360px); }
+.message-attachments .attachment-chip { padding: 0; overflow: hidden; }
+.message-attachments .attachment-image-button, .message-attachments .attachment-name { flex-direction: column; align-items: stretch; justify-content: center; width: 100%; padding: 6px; gap: 5px; min-height: 84px; }
+.message-attachments .attachment-label { font-size: 11px; text-align: center; }
+.message-attachments .attachment-thumbnail { width: 100%; height: 72px; margin: 0; border-radius: 7px; }
+.message-attachments .attachment-name > .icon { margin: 4px auto; }
+.attachment-more { min-height: 84px; border: 1px solid #d8e1d4; border-radius: 12px; background: #edf1ea; color: #395542; font-size: 20px; }
+.attachment-placeholder { display: flex; align-items: center; justify-content: center; background: #e1e7dd; }
 .attachment-path { grid-column: 1 / -1; color: #657466; font-size: 11px; overflow-wrap: anywhere; user-select: all; }
 .attachment-copy { justify-self: start; border: 0; border-radius: 4px; padding: 3px 0; background: transparent; color: #526558; font-size: 11px; text-decoration: underline; }
 .attachment-remove { grid-column: 2; grid-row: 1; align-self: start; min-width: 28px; min-height: 28px; border: 0; border-radius: 6px; padding: 0 4px; background: transparent; color: #526558; font-size: 20px; line-height: 1; }
@@ -26,7 +38,7 @@
 .attachment-preview .dialog-header h2 { min-width: 0; overflow-wrap: anywhere; }
 .attachment-preview-image { display: block; max-width: 100%; max-height: calc(100dvh - 160px); object-fit: contain; margin: 0 auto; }
 .attachment-preview > .quiet { margin-top: 12px; }
-.attachment-thumbnail { width: 40px; height: 40px; object-fit: cover; vertical-align: middle; margin-right: 6px; border-radius: 4px; }
+.attachment-thumbnail { flex-shrink: 0; width: 40px; height: 40px; object-fit: cover; vertical-align: middle; border-radius: 6px; }
 .attachment-manager { max-height: 80dvh; }
 .upload-task { padding: 12px 0; border-top: 1px solid #dce2d7; overflow-wrap: anywhere; }
 .upload-task small { display: block; }
@@ -42,6 +54,15 @@
 .reader-body pre { white-space: pre; font: 13px/1.6 Consolas, monospace; overflow-x: auto; }
 .reader-image { max-width: 100%; height: auto; }
 .reader-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+.reader-controls { flex-shrink: 0; max-height: 35%; overflow-y: auto; border-bottom: 1px solid #dce3d8; }
+.reader-path { width: 100%; margin: 4px 0; font-size: 12px; overflow-wrap: anywhere; user-select: all; }
+.reader-navigation { display: flex; justify-content: space-between; flex-shrink: 0; }
+.reader-dialog .dialog-header { gap: 0; margin-bottom: 0; }
+.reader-dialog .dialog-header h2 { font-size: 16px; }
+.reader-dialog > .field-note { margin: 4px 0; }
+.reader-line { display: block; min-height: 1.6em; padding: 0 8px 0 4.5em; position: relative; }
+.reader-line::before { content: attr(data-line); position: absolute; left: 0; width: 3.5em; text-align: right; color: #70806f; user-select: none; }
+.reader-line-selected { background: #e1efdc; box-shadow: inset 3px 0 #4f715b; }
 .reader-dialog .reader-controls select { width: auto; padding: 5px; }
 .attachment-manager > .attachments { max-height: 60dvh; overflow-y: auto; display: flex; flex-direction: column; flex-wrap: nowrap; overscroll-behavior: contain; }
 .attachment-manager .attachment-remove { min-width: 48px; min-height: 48px; }

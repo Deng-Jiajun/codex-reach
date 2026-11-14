@@ -82,6 +82,7 @@ function openQueueEditor(client: ReachClient, item: QueueItem, cwd: string, save
   const error = dialog.querySelector<HTMLElement>('.form-error')!;
   const save = dialog.querySelector<HTMLButtonElement>('.queue-save')!;
   const options = structuredClone(item.options);
+  const attachments = options.attachments ??= [];
   const parsed = queuePrompt(item.prompt);
   let annotations = parsed.annotations;
   input.value = parsed.text;
@@ -92,8 +93,8 @@ function openQueueEditor(client: ReachClient, item: QueueItem, cwd: string, save
   model.addEventListener('change', () => { model.setCustomValidity(''); updateThinking(model, thinking, models); });
   thinking.addEventListener('change', () => thinking.setCustomValidity(''));
   function render(): void {
-    options.attachments = JSON.parse(localStorage.getItem(key) ?? '[]') as FileAttachment[];
-    dialog.querySelector('.queue-manage')!.textContent = `附件（${options.attachments.length}）${uploadCount(client, key) ? ' · 上传待处理' : ''}`;
+    attachments.splice(0, attachments.length, ...JSON.parse(localStorage.getItem(key) ?? '[]') as FileAttachment[]);
+    dialog.querySelector('.queue-manage')!.textContent = `附件（${attachments.length}）${uploadCount(client, key) ? ' · 上传待处理' : ''}`;
     save.disabled = !editable || uploadCount(client, key) > 0;
     const refs = dialog.querySelector('.queue-contexts')!; refs.replaceChildren();
     for (const [kind, entries] of [['skills', options.skills ?? []], ['threadRefs', options.threadRefs ?? []]] as const) {
@@ -127,8 +128,8 @@ function openQueueEditor(client: ReachClient, item: QueueItem, cwd: string, save
     current.push(...files.filter(file => !current.some(existing => existing.path === file.path)));
     localStorage.setItem(key, JSON.stringify(current)); render();
   }, false, key));
-  dialog.querySelector('.queue-manage')!.addEventListener('click', () => openAttachmentManager(options.attachments ?? [], client, editable ? index => {
-    options.attachments!.splice(index, 1); localStorage.setItem(key, JSON.stringify(options.attachments)); render();
+  dialog.querySelector('.queue-manage')!.addEventListener('click', () => openAttachmentManager(attachments, client, editable ? index => {
+    attachments.splice(index, 1); localStorage.setItem(key, JSON.stringify(attachments)); render();
   } : undefined, key));
   dialog.querySelector('form')!.addEventListener('submit', async event => {
     event.preventDefault(); if (!editable || uploadCount(client, key)) return;

@@ -1,4 +1,4 @@
-import { showDialog, setIcon, setAction, type Icon } from './ui';
+import { showDialog, closeTopDialog, setIcon, setAction, resizeComposer, type Icon } from './ui';
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
 import { renderMarkdown, copyText, sourceText, sourceRange, rangeOffsets } from './message-content';
@@ -34,6 +34,8 @@ for (const [id, glyph, label] of [
   ['jump-requests', 'unread', '查看待处理'],
   ['send-mode-button', 'chevron', '选择发送方式'],
 ] as const) setIcon(element(id), glyph, label);
+setAction(element<HTMLButtonElement>('add-images'), 'image', '图片');
+setAction(element<HTMLButtonElement>('add-files'), 'file', '文件 · 手机或电脑');
 
 element('search-button').addEventListener('click', () => {
   const panel = element('list-search');
@@ -46,13 +48,13 @@ const notice = element<HTMLParagraphElement>('notice');
 const urlInput = element<HTMLInputElement>('server-url');
 const keyInput = element<HTMLInputElement>('server-key');
 const connectButton = element<HTMLButtonElement>('connect-button');
-const refreshButton = element<HTMLButtonElement>('refresh-button');
+const refreshIndicator = element('refresh-indicator');
+let inboxRefreshing = false;
 const projectFilter = element<HTMLSelectElement>('project-filter');
 const searchInput = element<HTMLInputElement>('thread-search');
 const messageInput = element<HTMLTextAreaElement>('message-input');
 const sendButton = element<HTMLButtonElement>('send-button');
 const olderButton = element<HTMLButtonElement>('older-button');
-const stopButton = element<HTMLButtonElement>('stop-button');
 const newDialog = element<HTMLDialogElement>('new-chat-dialog');
 const optionsDialog = element<HTMLDialogElement>('options-dialog');
 const editDialog = element<HTMLDialogElement>('edit-dialog');
@@ -173,10 +175,9 @@ function showView(view: typeof currentView): void {
   if (view !== currentView) selectionToolbar.dismiss();
   currentView = view;
   for (const name of views) element(`${name}-view`).hidden = name !== view;
-  document.querySelector<HTMLElement>('.app-header')!.hidden = view === 'chat';
+  document.querySelector<HTMLElement>('.app-header')!.hidden = view !== 'connection';
   element('brand').textContent = view === 'connection' ? '连接设置' : 'Codex Reach';
   element('cancel-settings').hidden = view !== 'connection' || !settingsReturnView;
-  element('settings-button').hidden = view === 'connection';
   renderConnection();
 }
 
@@ -195,9 +196,10 @@ function stopUpdates(): void {
   generation += 1;
   clearTimeout(inboxRetryTimer);
   inboxRetryTimer = undefined;
-  refreshButton.disabled = false;
-  refreshButton.setAttribute('aria-label', '刷新');
-  refreshButton.removeAttribute('aria-busy');
+  inboxRefreshing = false;
+  refreshGesture = null;
+  refreshDistance = 0;
+  renderRefresh();
   opening = false;
   olderLoading = false;
   moreLoading = false;
@@ -348,12 +350,11 @@ async function loadInbox(token: number): Promise<void> {
 }
 
 async function refreshInbox(): Promise<void> {
-  if (!client || !foreground || currentView !== 'inbox') return;
+  if (!client || !foreground || currentView !== 'inbox' || inboxRefreshing) return;
   stopUpdates();
   const token = generation;
-  refreshButton.disabled = true;
-  refreshButton.setAttribute('aria-label', '正在刷新');
-  refreshButton.setAttribute('aria-busy', 'true');
+  inboxRefreshing = true;
+  renderRefresh();
   element('refresh-status').textContent = '';
   try {
     await loadInbox(token);
@@ -372,9 +373,8 @@ async function refreshInbox(): Promise<void> {
     else inboxRetryTimer = setTimeout(() => void refreshInbox(), 2000);
   } finally {
     if (token === generation) {
-      refreshButton.disabled = false;
-      refreshButton.setAttribute('aria-label', '刷新');
-      refreshButton.removeAttribute('aria-busy');
+      inboxRefreshing = false;
+      renderRefresh();
       renderConnection();
     }
   }
@@ -402,6 +402,7 @@ function menuDialog(title: string): { dialog: HTMLDialogElement; body: HTMLEleme
 
 function openThreadMenu(thread: Thread): void {
   const menu = menuDialog(threadTitle(thread));
+  menu.dialog.classList.add('thread-menu');
   const detail = document.createElement('p'); detail.className = 'field-note thread-detail';
   detail.textContent = [thread.cwd, thread.updatedAt ? new Date(thread.updatedAt * 1000).toLocaleString('zh-CN') : '', thread.waitingTargets?.length ? `正在等待 ${thread.waitingTargets.map(threadTitle).join('、')}` : ''].filter(Boolean).join('\n');
   menu.body.append(detail);
@@ -422,7 +423,7 @@ function openThreadMenu(thread: Thread): void {
     menu.body.replaceChildren();
     const form = document.createElement('form');
     const label = document.createElement('label'); label.textContent = '对话名称';
-    const input = document.createElement('input'); input.value = threadTitle(thread); input.maxLength = 60; input.required = true; label.append(input);
+    const input = document.createElement('input'); input.value = thread.title; input.maxLength = 60; input.required = true; label.append(input);
     const save = document.createElement('button'); save.type = 'submit'; save.className = 'primary'; save.textContent = '保存名称';
     form.append(label, save); menu.body.append(form); input.focus(); input.select();
     form.addEventListener('submit', async event => {
@@ -451,6 +452,11 @@ function openThreadMenu(thread: Thread): void {
   });
   action('改动文件', 'file', async () => { openChanges(client!, thread.id, thread.cwd); });
   if (selected?.id === thread.id) action('在对话中查找', 'search', async () => { openChatSearch(); });
+  if (currentView === 'chat') {
+    const settings = document.createElement('button'); settings.type = 'button'; settings.className = 'quiet'; settings.textContent = '连接设置';
+    settings.addEventListener('click', () => { menu.dialog.close(); openSettings(); });
+    menu.body.append(settings);
+  }
   action('永久删除', 'trash', async () => { openDeletion(client!, thread, async ids => { await invalidateChats(ids); backToInbox(); }); });
 }
 
@@ -537,6 +543,10 @@ element('list-menu-button').addEventListener('click', () => {
   menu.body.append(archive);
   const notifications = document.createElement('button'); notifications.type = 'button'; notifications.className = 'quiet'; notifications.textContent = '任务提醒';
   notifications.addEventListener('click', () => { menu.dialog.close(); if (client) openNotificationSettings(client); }); menu.body.append(notifications);
+  const refresh = document.createElement('button'); refresh.type = 'button'; refresh.className = 'quiet'; refresh.textContent = '刷新'; refresh.id = 'refresh-button'; refresh.disabled = inboxRefreshing;
+  refresh.addEventListener('click', () => { menu.dialog.close(); void refreshInbox(); }); menu.body.append(refresh);
+  const settings = document.createElement('button'); settings.type = 'button'; settings.className = 'quiet'; settings.textContent = '连接设置';
+  settings.addEventListener('click', () => { menu.dialog.close(); openSettings(); }); menu.body.append(settings);
 });
 
 async function togglePin(id: string): Promise<void> {
@@ -568,6 +578,14 @@ async function togglePin(id: string): Promise<void> {
   }
 }
 
+function renderTaskState(node: HTMLElement, label: string): void {
+  node.textContent = label;
+  node.hidden = !label;
+  node.classList.toggle('task-running', label === '进行中');
+  node.setAttribute('aria-label', label);
+  node.title = label;
+}
+
 function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
@@ -576,7 +594,7 @@ function renderInbox(): void {
     const project = threadProject(thread, projects);
     const matchesProject = !projectId || (projectId === '__none__'
       ? !project : Boolean(project && selectedProject && directoryKey(project.path) === directoryKey(selectedProject.path)));
-    const searchText = [threadTitle(thread), project?.name, thread.cwd].join(' ').toLocaleLowerCase();
+    const searchText = [thread.title, project?.name, thread.cwd].join(' ').toLocaleLowerCase();
     return matchesProject && (!query || searchText.includes(query));
   });
   const fragment = document.createDocumentFragment();
@@ -602,7 +620,7 @@ function renderInbox(): void {
     if (thread.isUnread) { const unread = document.createElement('span'); unread.className = 'unread-dot'; unread.setAttribute('aria-label', '未读'); button.append(unread); }
     if (thread.pinned) { const pin = document.createElement('span'); pin.className = 'static-pin'; pin.innerHTML = pinIcon; pin.setAttribute('aria-label', '已置顶'); button.append(pin); }
     const state = thread.waitingForUser ? '待处理' : thread.waitingForThread ? '等待对话' : stateLabel(thread.status);
-    if (state) { const status = document.createElement('span'); status.className = 'thread-status'; status.textContent = state; button.append(status); }
+    if (state) { const status = document.createElement('span'); status.className = 'thread-status'; renderTaskState(status, state); button.append(status); }
     let press: ReturnType<typeof setTimeout> | undefined;
     let held = false;
     let origin = { x: 0, y: 0 };
@@ -1008,6 +1026,23 @@ function renderProcess(group: MessageGroup, turn: Turn, answers: Map<string, str
   return node;
 }
 
+function renderSendButton(): void {
+  const uploading = Boolean(client && selected && uploadCount(client, storageKey('attachments', selected.id)));
+  const hasContent = Boolean(messageInput.value.trim() || selectedFiles.length || selectedSkills.length || selectedThreads.length || selectedAnnotations.length || uploading);
+  const stopping = runtimeStatus === 'active' && !hasContent;
+  sendButton.dataset.action = stopping ? 'stop' : 'send';
+  if (stopping) {
+    setIcon(sendButton, 'stop', stopOperation ? '正在停止' : '停止任务');
+    sendButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
+  } else {
+    const queued = runtimeStatus === 'active' && sendMode === 'queue';
+    setIcon(sendButton, queued ? 'queue' : 'send', queued ? '排队到下一轮' : runtimeStatus === 'active' ? '立即追加' : '发送');
+    sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
+      || !hasContent || uploading || (Boolean(selectedFiles.length) && runtimeStatus === null);
+  }
+  element('send-mode-button').hidden = runtimeStatus !== 'active' || !hasContent;
+}
+
 function renderChat(forceBottom = false): void {
   if (!selected) return;
   selectionToolbar.setDisabled(Boolean(pending));
@@ -1015,9 +1050,8 @@ function renderChat(forceBottom = false): void {
   element('chat-title').textContent = threadTitle(selected);
   element('chat-title').title = threadTitle(selected);
   element('chat-meta').textContent = [selected.cwd, liveModel, liveThinking].filter(Boolean).join(' · ');
-  element('chat-state').textContent = stateLabel(runtimeStatus ?? '');
+  renderTaskState(element('chat-state'), liveWaiting ? '待处理' : stateLabel(runtimeStatus ?? ''));
   element('chat-state').dataset.status = runtimeStatus ?? '';
-  element('chat-state').hidden = !element('chat-state').textContent;
   if (optionsDialog.open && optionsChatId === selected.id && runtimeStatus !== null && liveModel && liveThinking) {
     element('options-current').textContent = `当前会话使用 ${liveModel} · ${liveThinking}`;
   }
@@ -1090,18 +1124,11 @@ function renderChat(forceBottom = false): void {
   const activity = element('activity');
   activity.textContent = runtimeStatus === null && liveRequests.length ? '等待电脑端重新同步请求…' : liveWaiting ? '等待处理请求' : '正在处理…';
   activity.hidden = !connected || (!liveWaiting && runtimeStatus !== 'active' && !liveRequests.length);
-  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-    || (!messageInput.value.trim() && !selectedFiles.length && !selectedSkills.length && !selectedThreads.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null);
-  const queued = runtimeStatus === 'active' && sendMode === 'queue';
-  setIcon(sendButton, queued ? 'queue' : 'send', queued ? '排队到下一轮' : runtimeStatus === 'active' ? '立即追加' : '发送');
-  element('send-mode-button').hidden = runtimeStatus !== 'active';
+  renderSendButton();
   const queuedCount = queueItems.filter(item => !['accepted', 'cancelled'].includes(item.status)).length;
   setIcon(element('queue-button'), 'queue', `待发队列（${queuedCount}）`);
   element('queue-button').dataset.count = queuedCount ? String(queuedCount) : '';
-  element('queue-button').hidden = runtimeStatus !== 'active' && !queuedCount;
-  stopButton.hidden = runtimeStatus !== 'active' || !activeTurnId;
-  stopButton.disabled = !connected || !activeTurnId || Boolean(stopOperation);
-  stopButton.setAttribute('aria-label', stopOperation ? '正在停止' : '停止任务');
+  element('queue-button').hidden = !queuedCount;
   element('stop-note').hidden = !stopOperation;
   element('stop-status').textContent = stopOperation?.error ?? (stopOperation?.status === 'accepted' ? '已请求停止，正在等待轮次结束…' : '正在确认停止结果…');
   element('resolve-stop').hidden = stopOperation?.status !== 'unknown' || !activeTurnId;
@@ -1117,9 +1144,9 @@ function renderChat(forceBottom = false): void {
     renderChat();
   } });
   const uploading = client ? uploadCount(client, storageKey('attachments', selected.id)) : 0;
-  sendButton.disabled ||= uploading > 0;
   element('manage-files').hidden = !selectedFiles.length && !uploading;
-  element('manage-files').textContent = `附件（${selectedFiles.length}）${uploading ? ` · ${uploading} 项上传` : ''}`;
+  setIcon(element('manage-files'), 'file', `管理 ${selectedFiles.length} 个附件${uploading ? ` · ${uploading} 项上传待处理` : ''}`);
+  element('manage-files').dataset.count = String(selectedFiles.length + uploading);
   renderAnnotations(element('selected-annotations'), selectedAnnotations, pending ? undefined : index => {
     selectedAnnotations.splice(index, 1);
     localStorage.setItem(storageKey('annotations', selected!.id), JSON.stringify(selectedAnnotations));
@@ -1230,7 +1257,7 @@ async function checkReceipt(token: number): Promise<void> {
   if (receipt.status === 'accepted') {
     if (messageInput.value === request.prompt) {
       messageInput.value = '';
-      messageInput.style.height = 'auto';
+      resizeInput();
       localStorage.removeItem(storageKey('draft', chatId));
     }
     if (request.options?.skills?.length) {
@@ -1315,6 +1342,9 @@ element('send-mode-button').addEventListener('click', () => {
 });
 
 async function sendMessage(): Promise<void> {
+  renderSendButton();
+  if (sendButton.disabled) return;
+  if (sendButton.dataset.action === 'stop') { await stopTask(); return; }
   if ((selectedFiles.length && runtimeStatus === null) || (client && selected && uploadCount(client, storageKey('attachments', selected.id)))) return;
   await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles, threadRefs: selectedThreads }, undefined, selectedAnnotations, runtimeStatus === 'active' && sendMode === 'queue');
 }
@@ -1659,11 +1689,11 @@ function renderReferences(container: HTMLElement, skills: Skill[], refs: ThreadR
   container.hidden = !skills.length && !refs.length;
   container.replaceChildren();
   for (const item of [...skills.map(skill => ({ kind: 'skill' as const, id: skill.path, title: skill.name })),
-    ...refs.map(thread => ({ kind: 'thread' as const, id: thread.id, title: thread.title }))]) {
+    ...refs.map(thread => ({ kind: 'thread' as const, id: thread.id, title: threadTitle(thread) }))]) {
     const group = document.createElement('span'); group.className = 'reference-chip';
     const detail = document.createElement('button'); detail.type = 'button'; detail.className = 'quiet'; detail.textContent = item.title;
     detail.addEventListener('click', () => {
-      if (item.kind === 'skill' && client) void openReader(item.id, client);
+      if (item.kind === 'skill' && client) void openReader({ path: item.id }, client);
       else {
         const dialog = document.createElement('dialog'); dialog.className = 'task-dialog';
         const title = document.createElement('h2'); title.textContent = item.title;
@@ -1703,7 +1733,8 @@ function renderNewContext(): void {
   } });
   const uploading = client ? uploadCount(client, storageKey('attachments', '__new__')) : 0;
   element('new-manage-files').hidden = !files.length && !uploading;
-  element('new-manage-files').textContent = `附件（${files.length}）${uploading ? ` · ${uploading} 项上传待处理` : ''}`;
+  setIcon(element('new-manage-files'), 'file', `管理 ${files.length} 个附件${uploading ? ` · ${uploading} 项上传待处理` : ''}`);
+  element('new-manage-files').dataset.count = String(files.length + uploading);
   element('new-parameters-button').textContent = newModel.value ? `${newModel.value} · ${newThinking.value}` : '使用默认设置';
 }
 
@@ -1833,9 +1864,7 @@ element('new-expand-input').addEventListener('click', () => {
   resizeNewInput(); element<HTMLTextAreaElement>('new-chat-prompt').focus({ preventScroll: true });
 });
 function resizeNewInput(): void {
-  const input = element<HTMLTextAreaElement>('new-chat-prompt'); input.style.height = 'auto';
-  const limit = element('new-expand-input').getAttribute('aria-expanded') === 'true' ? Math.max(160, (window.visualViewport?.height ?? innerHeight) * .5) : 160;
-  input.style.height = `${Math.min(limit, input.scrollHeight)}px`;
+  resizeComposer(element<HTMLTextAreaElement>('new-chat-prompt'), element('new-expand-input'));
 }
 window.visualViewport?.addEventListener('resize', resizeNewInput);
 newModel.addEventListener('change', () => {
@@ -1969,13 +1998,11 @@ element('options-form').addEventListener('submit', async event => {
   optionsDialog.close();
   renderChat();
 });
-stopButton.addEventListener('click', () => void stopTask());
 element('resolve-stop').addEventListener('click', () => { clearStopOperation(); void stopTask(); });
 for (const button of document.querySelectorAll<HTMLButtonElement>('[data-close-dialog]')) {
   button.addEventListener('click', () => element<HTMLDialogElement>(button.dataset.closeDialog!).close());
 }
 for (const dialog of [newDialog, optionsDialog]) dialog.addEventListener('close', () => { dialogRequest += 1; });
-element('settings-button').addEventListener('click', openSettings);
 element('notification-settings').addEventListener('click', () => { if (client) openNotificationSettings(client); else inform('连接电脑后可设置任务提醒'); });
 document.addEventListener('click', event => {
   if (event.defaultPrevented || !(event.target instanceof Element)) return;
@@ -1984,7 +2011,6 @@ document.addEventListener('click', event => {
   event.preventDefault();
   void openReader(link.href, client, selected?.cwd).catch(error => inform(errorText(error)));
 });
-element('chat-settings-button').addEventListener('click', openSettings);
 element('cancel-settings').addEventListener('click', closeSettings);
 element('back-button').addEventListener('click', backToInbox);
 element('reconnect-button').addEventListener('click', () => {
@@ -2000,14 +2026,44 @@ element('retry-history').addEventListener('click', () => {
 });
 projectFilter.addEventListener('change', renderInbox);
 searchInput.addEventListener('input', renderInbox);
-refreshButton.addEventListener('click', () => void refreshInbox());
-let refreshGesture: number | null = null;
-element('inbox-view').addEventListener('touchstart', event => {
-  refreshGesture = element('inbox-view').scrollTop <= 0 ? event.touches[0].clientY : null;
+const inboxView = element('inbox-view');
+let refreshGesture: { x: number; y: number } | null = null;
+let refreshDistance = 0;
+function renderRefresh(): void {
+  const distance = inboxRefreshing ? 48 : Math.min(refreshDistance / 2, 72);
+  refreshIndicator.style.height = `${distance}px`;
+  refreshIndicator.style.opacity = String(Math.min(distance / 32, 1));
+  refreshIndicator.classList.toggle('dragging', Boolean(refreshGesture) && !inboxRefreshing);
+  refreshIndicator.setAttribute('aria-hidden', String(!distance));
+  refreshIndicator.setAttribute('aria-busy', String(inboxRefreshing));
+  refreshIndicator.querySelector<SVGElement>('svg')!.style.transform = `rotate(${refreshDistance * 2}deg)`;
+  element('refresh-hint').textContent = inboxRefreshing ? '正在刷新' : refreshDistance >= 80 ? '松开刷新' : '下拉刷新';
+  const button = element<HTMLButtonElement>('refresh-button');
+  if (button) button.disabled = inboxRefreshing;
+}
+inboxView.addEventListener('touchstart', event => {
+  refreshDistance = 0;
+  refreshGesture = inboxView.scrollTop <= 0 && !inboxRefreshing && event.touches.length === 1
+    && !(event.target as Element).closest('.inbox-heading, input, select')
+    ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
 }, { passive: true });
-element('inbox-view').addEventListener('touchend', event => {
-  if (refreshGesture !== null && event.changedTouches[0].clientY - refreshGesture > 80 && !refreshButton.disabled) void refreshInbox();
-  refreshGesture = null;
+inboxView.addEventListener('touchmove', event => {
+  if (!refreshGesture) return;
+  const distance = event.touches[0].clientY - refreshGesture.y;
+  if (event.touches.length !== 1 || inboxView.scrollTop > 0 || Math.abs(event.touches[0].clientX - refreshGesture.x) > Math.abs(distance)) {
+    refreshGesture = null; refreshDistance = 0; renderRefresh(); return;
+  }
+  refreshDistance = Math.max(0, distance);
+  if (refreshDistance > 0) event.preventDefault();
+  renderRefresh();
+}, { passive: false });
+inboxView.addEventListener('touchend', () => {
+  const refresh = refreshGesture !== null && refreshDistance >= 80;
+  refreshGesture = null; refreshDistance = 0; renderRefresh();
+  if (refresh) void refreshInbox();
+}, { passive: true });
+inboxView.addEventListener('touchcancel', () => {
+  refreshGesture = null; refreshDistance = 0; renderRefresh();
 }, { passive: true });
 element('more-threads').addEventListener('click', async () => {
   if (!client || !nextThreads || moreLoading) return;
@@ -2098,9 +2154,7 @@ element('expand-input').addEventListener('click', () => {
   messageInput.focus({ preventScroll: true });
 });
 function resizeInput(): void {
-  messageInput.style.height = 'auto';
-  const limit = element('message-form').classList.contains('expanded') ? Math.max(160, (window.visualViewport?.height ?? innerHeight) * .5) : 160;
-  messageInput.style.height = `${Math.min(limit, messageInput.scrollHeight)}px`;
+  resizeComposer(messageInput, element('expand-input'));
 }
 window.visualViewport?.addEventListener('resize', resizeInput);
 scroll.addEventListener('scroll', () => {
@@ -2116,9 +2170,7 @@ element('jump-requests').addEventListener('click', () => element('requests').scr
 messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
   resizeInput();
-  sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-    || (!messageInput.value.trim() && !selectedFiles.length && !selectedSkills.length && !selectedThreads.length && !selectedAnnotations.length) || (Boolean(selectedFiles.length) && runtimeStatus === null)
-    || Boolean(client && selected && uploadCount(client, storageKey('attachments', selected.id)));
+  renderSendButton();
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));
@@ -2129,8 +2181,7 @@ element('resolve-delivery').addEventListener('click', () => {
 
 if (Capacitor.getPlatform() === 'android') {
   void App.addListener('backButton', () => {
-    const dialog = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].at(-1);
-    if (dialog) dialog.close();
+    if (closeTopDialog()) return;
     else if (selectionToolbar.dismiss()) return;
     else if (currentView === 'chat') backToInbox();
     else if (currentView === 'connection' && settingsReturnView) closeSettings();

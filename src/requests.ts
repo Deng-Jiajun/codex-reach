@@ -266,11 +266,16 @@ function questionInput(parent: HTMLElement, question: RecordValue, answer?: stri
     if (input instanceof HTMLInputElement) { input.type = 'password'; input.autocomplete = 'off'; }
     input.setAttribute('aria-label', optionList.length ? '自定义回答' : question.question);
     input.value = answer !== undefined && !radios.some(radio => radio.checked) ? answer : '';
-    input.required = true;
-    input.disabled = Boolean(custom && !custom.checked);
+    input.required = !custom || custom.checked;
     group.append(input);
-    group.addEventListener('change', () => { if (input) { input.disabled = Boolean(custom && !custom.checked); input.setCustomValidity(''); } });
-    input.addEventListener('input', () => input!.setCustomValidity(''));
+    group.addEventListener('change', () => { if (input) { input.required = !custom || custom.checked; input.setCustomValidity(''); } });
+    const selectCustom = () => {
+      if (custom) custom.checked = true;
+      input!.required = true;
+      input!.setCustomValidity('');
+    };
+    input.addEventListener('focus', selectCustom);
+    input.addEventListener('input', selectCustom);
   }
   parent.append(group);
   return () => {

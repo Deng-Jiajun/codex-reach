@@ -76,7 +76,7 @@ public class MobileUpgradeTest {
 
     private void openOrganization(WebView web) throws Exception {
         if (evaluate(web, "!document.querySelector('#chat-view').hidden").equals("true")) evaluate(web, "document.querySelector('#back-button').click();null");
-        await(web, "!document.querySelector('#inbox-view').hidden && !document.querySelector('#refresh-button').disabled && Boolean(document.querySelector('[data-thread-id=fixture-organization]'))");
+        await(web, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(document.querySelector('[data-thread-id=fixture-organization]'))");
         evaluate(web, "document.querySelector('[data-thread-id=fixture-organization]').click();null");
         await(web, "document.querySelector('#messages').textContent.includes('HTML 阅读')");
     }
@@ -92,7 +92,7 @@ public class MobileUpgradeTest {
         evaluate(document, "document.querySelector('button').click();null");
         await(document, "document.querySelector('#result').textContent==='READER_SCRIPT_OK'");
         assertTrue(windowRatio(reader) > .40 && windowRatio(reader) < .70);
-        clickText(reader, "展开");
+        clickText(reader, "展开阅读面板");
         awaitCondition(() -> windowRatio(reader) > .85, "reader expanded");
         screenshot("reader-html");
         tapElement(document, "#next-page");
@@ -109,6 +109,19 @@ public class MobileUpgradeTest {
         evaluate(web, "[...document.querySelectorAll('.message-content a')].find(link=>link.textContent==='PDF 阅读').click();null");
         ReaderActivity pdf = awaitReader("pdf");
         awaitCondition(() -> hasText(pdf, "1 / 1"), "PDF first page");
+        int readsBeforeReload = pdfReads();
+        clickText(pdf, "阅读操作");
+        awaitCondition(() -> {
+            android.view.accessibility.AccessibilityNodeInfo menu = InstrumentationRegistry.getInstrumentation().getUiAutomation().getRootInActiveWindow();
+            if (menu == null) return false;
+            for (android.view.accessibility.AccessibilityNodeInfo item : menu.findAccessibilityNodeInfosByText("重新读取")) {
+                while (item != null && !item.isClickable()) item = item.getParent();
+                if (item != null && item.performAction(android.view.accessibility.AccessibilityNodeInfo.ACTION_CLICK)) return true;
+            }
+            return false;
+        }, "PDF reload menu action");
+        awaitCondition(() -> pdfReads() > readsBeforeReload, "PDF downloaded again");
+        awaitCondition(() -> hasText(pdf, "1 / 1"), "PDF page after reload");
         screenshot("reader-pdf");
         clickText(pdf, "关闭");
         ByteArrayOutputStream saved = new ByteArrayOutputStream();
@@ -120,7 +133,7 @@ public class MobileUpgradeTest {
         request("/control/mobile-reset", new JSONObject());
         context.getSystemService(NotificationManager.class).cancelAll();
         shell("pm grant " + context.getPackageName() + " android.permission.POST_NOTIFICATIONS");
-        evaluate(web, "document.querySelector(document.querySelector('#chat-view').hidden?'#settings-button':'#chat-settings-button').click();document.querySelector('#notification-settings').click();null");
+        evaluate(web, "document.querySelector(document.querySelector('#chat-view').hidden?'#list-menu-button':'#chat-menu-button').click(); [...document.querySelectorAll('.menu-actions button')].find(button=>button.textContent==='连接设置').click();document.querySelector('#notification-settings').click();null");
         await(web, "Boolean(document.querySelector('.notification-options'))");
         evaluate(web, "document.querySelector('.notification-options input[name=enabled]').checked=true;document.querySelector('.notification-options').requestSubmit();null");
         awaitCondition(() -> NotificationsPlugin.preferences(context).contains("cursor:android-fixture") && NotificationService.running, "notification connection established");
@@ -147,6 +160,15 @@ public class MobileUpgradeTest {
     }
 
     private void event(String id, String kind) throws Exception { request("/control/mobile-event", new JSONObject().put("id", id).put("kind", kind)); }
+
+    private int pdfReads() {
+        try {
+            HttpURLConnection connection = (HttpURLConnection) URI.create("http://10.0.2.2:4320/control/mobile-stats").toURL().openConnection();
+            connection.setConnectTimeout(5000); connection.setReadTimeout(5000);
+            try { return new JSONObject(new String(connection.getInputStream().readAllBytes(), StandardCharsets.UTF_8)).getInt("pdfReads"); }
+            finally { connection.disconnect(); }
+        } catch (Exception error) { throw new AssertionError("Cannot read PDF download count", error); }
+    }
 
     private int notificationCount(String tag) {
         int count = 0;
@@ -185,6 +207,7 @@ public class MobileUpgradeTest {
     }
 
     private View text(View view, String text) {
+        if (text.contentEquals(view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
         if (view instanceof TextView && ((TextView) view).getText().toString().equals(text)) return view;
         if (view instanceof ViewGroup) for (int i = 0; i < ((ViewGroup) view).getChildCount(); i++) { View found = text(((ViewGroup) view).getChildAt(i), text); if (found != null) return found; }
         return null;

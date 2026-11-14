@@ -1,4 +1,4 @@
-import { showDialog } from './ui';
+import { showDialog, setIcon, icon } from './ui';
 import type { ReachClient } from './api';
 import { uploadFiles, renderUploadTasks } from './uploads';
 import { computerImage, displayImage, saveImage, openReader } from './reader';
@@ -141,7 +141,7 @@ export function openFilePicker(client: ReachClient, initialPath: string, onSelec
         if (!entry.directory) {
           const preview = button('阅读', 'quiet');
           preview.setAttribute('aria-label', `阅读 ${entry.name}`);
-          preview.addEventListener('click', () => void openReader(entry.path, client, result.path ?? undefined));
+          preview.addEventListener('click', () => void openReader({ path: entry.path }, client, result.path ?? undefined));
           item.append(preview);
         }
         entries.append(item);
@@ -197,7 +197,7 @@ function safeImageUrl(url: string): string | null {
 
 export async function loadImage(attachment: MessageAttachment, client?: ReachClient | null, refresh = false): Promise<string> {
   const source = attachment.url ? safeImageUrl(attachment.url) : null;
-  if (source) return displayImage(source);
+  if (source) return displayImage(source, refresh);
   if (attachment.url?.startsWith('sediment://')) throw new Error('此图片仅有桌面媒体标识，当前读取接口尚未支持');
   if (!attachment.path) throw new Error('此图片地址无法预览');
   if (!client) throw new Error('当前未连接电脑');
@@ -205,10 +205,28 @@ export async function loadImage(attachment: MessageAttachment, client?: ReachCli
 }
 
 export function openPreview(attachment: MessageAttachment, client?: ReachClient | null): void {
-  if (attachment.path) { void openReader(attachment.path, client ?? null); return; }
+  if (attachment.path) { void openReader({ path: attachment.path }, client ?? null); return; }
   if (previewDialog?.open) { previewDialog.focus(); return; }
-  const dialog = createDialog(attachment.name || '图片预览', 'attachment-preview');
+  const dialog = createDialog(attachment.name || '图片预览', 'attachment-preview reader-dialog');
   previewDialog = dialog;
+  const header = dialog.querySelector<HTMLElement>('.dialog-header')!;
+  const tools = element('div', '', 'reader-controls'); tools.hidden = true;
+  const more = button(''); setIcon(more, 'more', '阅读操作'); more.setAttribute('aria-expanded', 'false');
+  more.addEventListener('click', () => { tools.hidden = !tools.hidden; more.setAttribute('aria-expanded', String(!tools.hidden)); });
+  const expand = button('');
+  const resize = (full: boolean) => {
+    dialog.classList.toggle('reader-full', full);
+    setIcon(expand, full ? 'collapse' : 'expand', full ? '收起阅读面板' : '展开阅读面板');
+  };
+  resize(false);
+  expand.addEventListener('click', () => resize(!dialog.classList.contains('reader-full')));
+  header.append(more, expand);
+  let startY = 0;
+  header.addEventListener('touchstart', event => { startY = event.touches[0].clientY; }, { passive: true });
+  header.addEventListener('touchend', event => {
+    const distance = event.changedTouches[0].clientY - startY;
+    if (Math.abs(distance) > 40) resize(distance < 0);
+  });
   const status = element('p', '正在读取图片…', 'field-note');
   status.setAttribute('role', 'status');
   const error = element('p', '', 'form-error');
@@ -219,7 +237,8 @@ export function openPreview(attachment: MessageAttachment, client?: ReachClient 
   picture.hidden = true;
   const retry = button('重试');
   retry.hidden = true;
-  dialog.append(status, error, picture, retry);
+  const body = element('div', '', 'reader-body'); body.append(picture);
+  dialog.append(tools, status, error, body, retry);
   const save = button('保存原图片到手机');
   save.addEventListener('click', async () => {
     save.disabled = true; status.hidden = false; status.textContent = '正在保存…';
@@ -231,7 +250,8 @@ export function openPreview(attachment: MessageAttachment, client?: ReachClient 
     } catch (failure) { status.textContent = errorText(failure); }
     finally { save.disabled = false; }
   });
-  dialog.append(save);
+  const refresh = button('重新读取'); refresh.addEventListener('click', () => void load(true));
+  tools.append(refresh, save);
   dialog.addEventListener('close', () => {
     picture.removeAttribute('src');
     if (previewDialog === dialog) previewDialog = null;
@@ -246,13 +266,13 @@ export function openPreview(attachment: MessageAttachment, client?: ReachClient 
     retry.disabled = false;
   }
 
-  async function load(): Promise<void> {
+  async function load(refresh = false): Promise<void> {
     error.hidden = true;
     status.hidden = false;
     picture.hidden = true;
     retry.disabled = true;
     try {
-      const source = await loadImage(attachment, client, true);
+      const source = await loadImage(attachment, client, refresh);
       if (dialog.open) picture.src = source;
     } catch (failure) { if (dialog.open) showFailure(errorText(failure)); }
   }
@@ -265,7 +285,7 @@ export function openPreview(attachment: MessageAttachment, client?: ReachClient 
     retry.disabled = false;
   });
   picture.addEventListener('error', () => { if (dialog.open) showFailure('图片无法显示，请重试'); });
-  retry.addEventListener('click', () => void load());
+  retry.addEventListener('click', () => void load(true));
   showDialog(dialog);
   void load();
 }
@@ -293,9 +313,11 @@ async function copyPath(path: string, status: HTMLElement, parent: HTMLElement):
 
 function createAttachmentRow(attachment: MessageAttachment, options: AttachmentOptions): AttachmentRow {
   const root = element('div', '', 'attachment-chip');
-  const name = button(attachment.name || attachment.path || '附件', attachment.image ? 'attachment-image-button' : 'attachment-name');
-  const remove = button('×', 'attachment-remove');
-  remove.setAttribute('aria-label', `移除附件 ${attachment.name}`);
+  root.classList.toggle('attachment-photo', attachment.image);
+  const name = button('', attachment.image ? 'attachment-image-button' : 'attachment-name');
+  name.append(element('span', attachment.name || attachment.path?.split(/[/\\]/).at(-1) || '附件', 'attachment-label'));
+  const remove = button('', 'attachment-remove');
+  setIcon(remove, 'close', `移除附件 ${attachment.name}`);
   const row: AttachmentRow = { root, attachment, remove, index: 0, options };
   if (attachment.image) {
     name.setAttribute('aria-label', `预览图片 ${attachment.name}`);
@@ -304,25 +326,46 @@ function createAttachmentRow(attachment: MessageAttachment, options: AttachmentO
     thumbnail.alt = '';
     thumbnail.loading = 'lazy';
     name.prepend(thumbnail);
-    void loadImage(attachment, options.client).then(source => { thumbnail.src = source; }).catch(() => { thumbnail.remove(); });
-  } else if (attachment.path && !attachment.directory) name.addEventListener('click', () => void openReader(row.attachment.path!, row.options.client ?? null));
-  else name.disabled = true;
-  root.append(name);
-  if (attachment.path) {
-    const path = element('span', attachment.path, 'attachment-path');
-    const copy = button('复制路径', 'attachment-copy');
-    const status = element('span', '', 'attachment-feedback');
-    status.hidden = true;
-    status.setAttribute('role', 'status');
-    copy.addEventListener('click', () => void copyPath(row.attachment.path!, status, root));
-    root.append(path, copy, status);
+    void loadImage(attachment, options.client).then(source => { thumbnail.src = source; }).catch(() => {
+      const fallback = element('span', '', 'attachment-thumbnail attachment-placeholder');
+      fallback.innerHTML = icon('image'); thumbnail.replaceWith(fallback);
+      name.title = '图片未加载，点击重试';
+    });
+  } else {
+    name.insertAdjacentHTML('afterbegin', icon(attachment.directory ? 'folder' : 'file'));
+    name.addEventListener('click', () => showAttachmentDetail(row.attachment, row.options.client));
   }
+  root.append(name);
+  const detail = button('', 'quiet attachment-details');
+  setIcon(detail, 'more', `${attachment.name}的详情`);
+  detail.addEventListener('click', () => showAttachmentDetail(row.attachment, row.options.client));
+  root.append(detail);
   remove.addEventListener('click', () => row.options.onRemove?.(row.index));
   root.append(remove);
   return row;
 }
 
-export function openAttachmentManager(attachments: FileAttachment[], client: ReachClient | null,
+function showAttachmentDetail(attachment: MessageAttachment, client?: ReachClient | null): void {
+  const dialog = createDialog(attachment.name || '附件详情', 'attachment-detail');
+  if (attachment.path) {
+    dialog.append(element('p', attachment.path, 'attachment-path'));
+    const copy = button('复制路径');
+    const status = element('p', '', 'field-note'); status.setAttribute('role', 'status');
+    copy.addEventListener('click', () => void copyPath(attachment.path!, status, dialog));
+    dialog.append(copy, status);
+  }
+  if (!attachment.directory) {
+    const read = button(attachment.image ? '查看图片' : '阅读文件', 'primary');
+    read.addEventListener('click', () => {
+      if (attachment.image) openPreview(attachment, client);
+      else if (attachment.path) void openReader({ path: attachment.path }, client ?? null);
+    });
+    dialog.append(read);
+  }
+  showDialog(dialog);
+}
+
+export function openAttachmentManager(attachments: MessageAttachment[], client: ReachClient | null,
   onRemove?: (index: number) => void, draftKey = ''): void {
   const dialog = createDialog(`附件（${attachments.length}）`, 'attachment-manager');
   const list = element('div');
@@ -353,7 +396,8 @@ export function renderAttachments(container: HTMLElement, attachments: MessageAt
   const previous = attachmentRows.get(container) ?? [];
   const rows: AttachmentRow[] = [];
   let position = container.firstElementChild;
-  for (const [index, attachment] of attachments.entries()) {
+  const visible = container.classList.contains('message-attachments') && attachments.length > 3 ? attachments.slice(0, 2) : attachments;
+  for (const [index, attachment] of visible.entries()) {
     const existing = previous.find(row => !rows.includes(row) && row.attachment.path === attachment.path
       && row.attachment.url === attachment.url && row.attachment.name === attachment.name
       && row.attachment.image === attachment.image && row.attachment.directory === attachment.directory);
@@ -367,6 +411,12 @@ export function renderAttachments(container: HTMLElement, attachments: MessageAt
     position = row.root.nextElementSibling;
   }
   while (position) { const next = position.nextElementSibling; position.remove(); position = next; }
+  if (visible.length < attachments.length) {
+    const more = button(`+${attachments.length - visible.length}`, 'attachment-more');
+    more.setAttribute('aria-label', `查看全部 ${attachments.length} 个附件`);
+    more.addEventListener('click', () => openAttachmentManager(attachments, options.client ?? null));
+    container.append(more);
+  }
   attachmentRows.set(container, rows);
   container.classList.add('attachments');
   container.hidden = !attachments.length;
