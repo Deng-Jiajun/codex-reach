@@ -77,6 +77,7 @@ public class ChatFlowTest {
                 control("offline");
                 await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('.app-header [data-connection-status]').textContent==='重连中'");
                 evaluate(webView, "document.querySelector('#chat-menu-button').click(); document.querySelector('.menu-connection').click(); null");
+                await(webView, "!document.querySelector('#connection-view').hidden && !document.querySelector('.menu-dialog')");
                 InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
                 await(webView, "!document.querySelector('#chat-view').hidden");
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
@@ -141,7 +142,10 @@ public class ChatFlowTest {
     private void await(WebView webView, String condition) throws InterruptedException {
         long deadline = SystemClock.elapsedRealtime() + 30_000;
         while (!evaluate(webView, "Boolean(" + condition + ")").equals("true")) {
-            assertTrue("Timed out waiting for " + condition, SystemClock.elapsedRealtime() < deadline);
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                String state = evaluate(webView, "JSON.stringify({views:[...document.querySelectorAll('#connection-view,#inbox-view,#chat-view')].map(node=>({id:node.id,hidden:node.hidden})),dialogs:[...document.querySelectorAll('dialog')].map(node=>({className:node.className,open:node.open})),focus:document.activeElement?.id})");
+                throw new AssertionError("Timed out waiting for " + condition + "; state=" + state);
+            }
             SystemClock.sleep(200);
         }
     }
