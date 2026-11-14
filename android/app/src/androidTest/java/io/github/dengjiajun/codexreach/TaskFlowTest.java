@@ -122,7 +122,7 @@ public class TaskFlowTest {
     }
 
     private void verifyQueueAttachments(WebView webView) throws Exception {
-        evaluate(webView, "window.fixtureImmediateIcon=document.querySelector('#send-button').innerHTML; document.querySelector('#send-mode-button').click(); [...document.querySelectorAll('.send-mode-dialog .menu-actions button')].find(button=>button.textContent.startsWith('排队到下一轮')).click(); null");
+        evaluate(webView, "window.fixtureImmediateIcon=document.querySelector('#send-button').innerHTML; document.querySelector('#send-mode-button').click(); [...document.querySelectorAll('.send-mode-dialog[open] .menu-actions button')].find(button=>button.textContent.startsWith('排队到下一轮')).click(); null");
         assertEquals("true", evaluate(webView, "document.querySelector('#send-button').getAttribute('aria-label')==='排队到下一轮' && document.querySelector('#send-button').innerHTML!==window.fixtureImmediateIcon"));
         evaluate(webView, "localStorage.setItem('codex-reach-attachments:android-fixture:fixture-task',JSON.stringify(['A','B','C'].map(name=>({name:name+'.txt',path:'C:/Example/'+name+'.txt',directory:false,image:false})))); window.dispatchEvent(new Event('reach-uploads')); document.querySelector('#send-button').click(); null");
         await(webView, "document.querySelector('#delivery-note').hidden && !document.querySelector('#queue-button').hidden");
@@ -139,7 +139,7 @@ public class TaskFlowTest {
         assertEquals("C:/Example/C.txt", item.getJSONObject("options").getJSONArray("attachments").getJSONObject(0).getString("path"));
         evaluate(webView, "[...document.querySelectorAll('.queue-actions button')].find(button=>button.textContent==='取消').click(); null");
         await(webView, "!document.querySelector('.queue-item')");
-        evaluate(webView, "document.querySelector('dialog[open] .dialog-close').click(); document.querySelector('#message-input').value='待发送草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#send-mode-button').click(); [...document.querySelectorAll('.send-mode-dialog .menu-actions button')].find(button=>button.textContent.startsWith('立即追加')).click(); null");
+        evaluate(webView, "document.querySelector('dialog[open] .dialog-close').click(); document.querySelector('#message-input').value='待发送草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#send-mode-button').click(); [...document.querySelectorAll('.send-mode-dialog[open] .menu-actions button')].find(button=>button.textContent.startsWith('立即追加')).click(); null");
         assertEquals("true", evaluate(webView, "document.querySelector('#send-button').innerHTML===window.fixtureImmediateIcon"));
     }
 

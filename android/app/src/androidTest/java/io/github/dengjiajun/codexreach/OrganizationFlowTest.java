@@ -88,13 +88,13 @@ public class OrganizationFlowTest {
     private void verifyPin(WebView webView) throws Exception {
         assertEquals("true", evaluate(webView, "document.querySelector('#chat-pinned').hidden"));
         evaluate(webView, "document.querySelector('#chat-menu-button').click(); null");
-        clickNamedButton(webView, "document.querySelector('.menu-actions')", "置顶");
+        clickNamedButton(webView, "document.querySelector('.menu-dialog[open] .menu-actions')", "置顶");
         await(webView, "!document.querySelector('#chat-pinned').hidden && !document.querySelector('.menu-dialog')");
         evaluate(webView, "document.querySelector('#back-button').click(); null");
         await(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(document.querySelector('[data-thread-id=fixture-organization] .static-pin'))");
         pressElement(webView, "[data-thread-id=fixture-organization]", true);
         await(webView, "Boolean(document.querySelector('.menu-dialog'))");
-        clickNamedButton(webView, "document.querySelector('.menu-actions')", "取消置顶");
+        clickNamedButton(webView, "document.querySelector('.menu-dialog[open] .menu-actions')", "取消置顶");
         await(webView, "!document.querySelector('.menu-dialog') && !document.querySelector('[data-thread-id=fixture-organization] .static-pin')");
         assertEquals("false", evaluate(webView, "document.querySelector('#inbox-view').hidden"));
         JSONArray pins = stats().getJSONArray("pinRequests");
