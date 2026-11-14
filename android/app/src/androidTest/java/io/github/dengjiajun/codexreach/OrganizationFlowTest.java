@@ -91,7 +91,9 @@ public class OrganizationFlowTest {
         clickNamedButton(webView, "document.querySelector('.menu-dialog[open] .menu-actions')", "置顶");
         await(webView, "!document.querySelector('#chat-pinned').hidden && !document.querySelector('.menu-dialog')");
         evaluate(webView, "document.querySelector('#back-button').click(); null");
-        await(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && Boolean(document.querySelector('[data-thread-id=fixture-organization] .static-pin'))");
+        await(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true' && document.querySelector('#refresh-indicator').getBoundingClientRect().height<1 && Boolean(document.querySelector('[data-thread-id=fixture-organization] .static-pin'))");
+        evaluate(webView, "document.querySelector('[data-thread-id=fixture-organization]').scrollIntoView({block:'center'}); null");
+        assertEquals("Long-press target must be visible", "true", evaluate(webView, "(()=>{const row=document.querySelector('[data-thread-id=fixture-organization]');const r=row.getBoundingClientRect();return row.contains(document.elementFromPoint(r.left+24,r.top+12))})()"));
         pressElement(webView, "[data-thread-id=fixture-organization]", true);
         await(webView, "Boolean(document.querySelector('.menu-dialog'))");
         clickNamedButton(webView, "document.querySelector('.menu-dialog[open] .menu-actions')", "取消置顶");
