@@ -48,7 +48,7 @@ public class ChatFlowTest {
                 evaluate(webView, "document.querySelector('#project-filter-button').click(); document.querySelector('.project-choice input[value=\"__none__\"]').click(); null");
                 assertEquals("true", evaluate(webView, "document.querySelector('#project-filter-label').textContent==='无项目' && document.querySelectorAll('.thread-row').length===0"));
                 evaluate(webView, "document.querySelector('#project-filter-button').click(); document.querySelector('.project-choice input[value=\"\"]').click(); document.querySelector('#list-menu-button').click(); null");
-                assertEquals("true", evaluate(webView, "!document.querySelector('.menu-dialog select') && [...document.querySelectorAll('.menu-actions button')].every(button=>button.querySelector('svg')) && document.querySelector('.menu-connection [data-connection-status]').textContent==='已连接' && document.querySelector('.menu-actions').lastElementChild.classList.contains('menu-connection')"));
+                assertEquals("true", evaluate(webView, "!document.querySelector('.menu-dialog select') && [...document.querySelectorAll('.menu-actions button')].every(button=>button.querySelector('svg')) && document.querySelector('dialog[open] .menu-connection [data-connection-status]').textContent==='已连接' && document.querySelector('.menu-actions').lastElementChild.classList.contains('menu-connection')"));
                 evaluate(webView, "document.querySelector('.menu-dialog .dialog-close').click(); null");
                 evaluate(webView, "document.querySelector('#list-menu-button').click(); document.querySelector('#refresh-button').click(); null");
                 assertEquals("true", evaluate(webView, "document.querySelector('#refresh-indicator').getAttribute('aria-busy')==='true' && getComputedStyle(document.querySelector('#refresh-indicator svg')).animationName==='refresh-spin'"));
@@ -60,7 +60,7 @@ public class ChatFlowTest {
                 await(webView, "document.querySelector('#messages').textContent.includes('REACH_CHAT_OK') && document.querySelector('#delivery-note').hidden");
                 assertEquals("true", evaluate(webView, "!window.fixtureScriptExecuted && Boolean(document.querySelector('#messages table')) && Boolean(document.querySelector('#messages pre'))"));
                 evaluate(webView, "document.querySelector('#message-input').value='保留的手机草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); null");
-                evaluate(webView, "document.querySelector('#messages-scroll').scrollTop=10; window.savedScrollTop=document.querySelector('#messages-scroll').scrollTop; document.querySelector('#chat-menu-button').click(); document.querySelector('.menu-connection').click(); null");
+                evaluate(webView, "document.querySelector('#messages-scroll').scrollTop=10; window.savedScrollTop=document.querySelector('#messages-scroll').scrollTop; document.querySelector('#chat-menu-button').click(); document.querySelector('dialog[open] .menu-connection').click(); null");
                 await(webView, "!document.querySelector('#connection-view').hidden && !document.querySelector('#cancel-settings').hidden");
                 assertEquals("true", evaluate(webView, "Boolean(document.querySelector('.app-header #cancel-settings svg')) && document.querySelector('#cancel-settings').getBoundingClientRect().left<60"));
                 evaluate(webView, "document.querySelector('#server-key').value='wrong-key'; document.querySelector('#connection-form').requestSubmit(); null");
@@ -70,13 +70,13 @@ public class ChatFlowTest {
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
                 assertEquals("Reading position " + evaluate(webView, "JSON.stringify({saved:window.savedScrollTop,actual:document.querySelector('#messages-scroll').scrollTop})"),
                     "true", evaluate(webView, "Math.abs(document.querySelector('#messages-scroll').scrollTop-window.savedScrollTop)<2"));
-                evaluate(webView, "document.querySelector('#chat-menu-button').click(); document.querySelector('.menu-connection').click(); document.querySelector('#connection-form').requestSubmit(); null");
+                evaluate(webView, "document.querySelector('#chat-menu-button').click(); document.querySelector('dialog[open] .menu-connection').click(); document.querySelector('#connection-form').requestSubmit(); null");
                 await(webView, "!document.querySelector('#chat-view').hidden");
                 assertEquals("true", evaluate(webView, "document.querySelector('#message-input').value==='保留的手机草稿'"));
 
                 control("offline");
                 await(webView, "!document.querySelector('#reconnect-notice').hidden && document.querySelector('.app-header [data-connection-status]').textContent==='重连中'");
-                evaluate(webView, "document.querySelector('#chat-menu-button').click(); document.querySelector('.menu-connection').click(); null");
+                evaluate(webView, "document.querySelector('#chat-menu-button').click(); document.querySelector('dialog[open] .menu-connection').click(); null");
                 await(webView, "!document.querySelector('#connection-view').hidden && !document.querySelector('.menu-dialog')");
                 InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
                 await(webView, "!document.querySelector('#chat-view').hidden");

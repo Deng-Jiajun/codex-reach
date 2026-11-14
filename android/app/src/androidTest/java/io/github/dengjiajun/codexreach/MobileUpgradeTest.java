@@ -133,7 +133,7 @@ public class MobileUpgradeTest {
         request("/control/mobile-reset", new JSONObject());
         context.getSystemService(NotificationManager.class).cancelAll();
         shell("pm grant " + context.getPackageName() + " android.permission.POST_NOTIFICATIONS");
-        evaluate(web, "document.querySelector(document.querySelector('#chat-view').hidden?'#list-menu-button':'#chat-menu-button').click(); document.querySelector('.menu-connection').click();document.querySelector('#notification-settings').click();null");
+        evaluate(web, "document.querySelector(document.querySelector('#chat-view').hidden?'#list-menu-button':'#chat-menu-button').click(); document.querySelector('dialog[open] .menu-connection').click();document.querySelector('#notification-settings').click();null");
         await(web, "Boolean(document.querySelector('.notification-options'))");
         evaluate(web, "document.querySelector('.notification-options input[name=enabled]').checked=true;document.querySelector('.notification-options').requestSubmit();null");
         awaitCondition(() -> NotificationsPlugin.preferences(context).contains("cursor:android-fixture") && NotificationService.running, "notification connection established");
