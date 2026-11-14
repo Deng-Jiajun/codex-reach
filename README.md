@@ -167,6 +167,8 @@ npm run android:sync
 
 该命令构建 H5 并同步 Android 工程。安装包由 Actions 中的 `Android verification` 工作流生成。Android SDK、JDK 和 Gradle 构建环境由 CI 提供。
 
+`npm ci` 会应用当前 Capacitor 8.6.0 的回复通道顺序补丁，修正页面跳转后快速原生响应可能丢失的问题。依赖升级时需复核 `scripts/patch-capacitor-android.mjs`，依据见[决策记录](docs/决策记录.md#2026-11-14-首页筛选与菜单分组)。
+
 ## 安装验证包
 
 1. 打开 Actions 中成功完成的 `Android verification` 运行
