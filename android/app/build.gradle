@@ -9,8 +9,8 @@ android {
         applicationId "io.github.dengjiajun.codexreach"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 13
-        versionName "0.6.3-preview"
+        versionCode 14
+        versionName "0.6.4-preview"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
