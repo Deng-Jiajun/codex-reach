@@ -6,6 +6,7 @@ import { loadImage, openPreview } from './files';
 import { openReader } from './reader';
 import { readerPath } from './reader-path';
 import { setIcon } from './ui';
+import { renderThreadMarkers, type ThreadNavigation } from './thread-links';
 
 // Source offsets use rendered UTF-16 text, excluding controls injected by Reach
 export function sourceText(node: Node, native = true): string {
@@ -83,7 +84,7 @@ export async function copyText(text: string, button: HTMLButtonElement): Promise
 }
 
 export function renderMarkdown(container: HTMLElement, body: string, annotations: ResponseAnnotation[],
-  client: ReachClient | null, onAnnotation: (annotation: ResponseAnnotation, index: number) => void, root?: string): void {
+  client: ReachClient | null, onAnnotation: (annotation: ResponseAnnotation, index: number) => void, root?: string, navigation?: ThreadNavigation): void {
   const template = document.createElement('template');
   const renderer = new Renderer();
   renderer.code = token => {
@@ -186,6 +187,7 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
     }
     if (end) { fragment.append(text.data.slice(end)); text.replaceWith(fragment); }
   }
+  if (navigation) renderThreadMarkers(template.content, navigation);
   for (const pre of template.content.querySelectorAll('pre')) {
     const copy = document.createElement('button');
     copy.type = 'button';

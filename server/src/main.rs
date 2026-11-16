@@ -926,6 +926,25 @@ async fn threads(
     ))
 }
 
+#[derive(Deserialize)]
+struct ReferenceQuery {
+    #[serde(default)]
+    origin: bool,
+}
+
+async fn thread_reference(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<ReferenceQuery>,
+) -> Result<Json<Value>, ApiError> {
+    state
+        .app_server
+        .reference(&id, query.origin)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))
+}
+
 async fn history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1151,6 +1170,7 @@ async fn main() -> Result<()> {
         )
         .route("/threads", get(threads).post(create_thread))
         .route("/threads/{id}/history", get(history))
+        .route("/threads/{id}/reference", get(thread_reference))
         .route("/threads/{id}/settings", get(thread_settings))
         .route(
             "/threads/{id}/approval",

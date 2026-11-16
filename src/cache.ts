@@ -49,6 +49,10 @@ export class ChatCache {
     if (!columns.some(column => column.name === 'metadata')) {
       await this.database.execute('ALTER TABLE cached_messages ADD COLUMN metadata TEXT');
     }
+    const chatColumns = (await this.database.query('PRAGMA table_info(cached_chats)')).values ?? [];
+    if (!chatColumns.some(column => column.name === 'origin')) {
+      await this.database.execute('ALTER TABLE cached_chats ADD COLUMN origin TEXT');
+    }
   }
 
   async load(serverId: string, chatId: string): Promise<HistoryPage | null> {
@@ -65,7 +69,7 @@ export class ChatCache {
         ...(message.metadata ? JSON.parse(message.metadata) : {}),
       })),
     }));
-    return { id: chatId, title: chat.title, cwd: chat.cwd, status: chat.status, turns, nextCursor: chat.next_cursor, hasMore: Boolean(chat.has_more) };
+    return { id: chatId, title: chat.title, cwd: chat.cwd, status: chat.status, turns, nextCursor: chat.next_cursor, hasMore: Boolean(chat.has_more), origin: chat.origin ? JSON.parse(chat.origin) : undefined };
   }
 
   async save(serverId: string, page: HistoryPage, revision: string | null): Promise<void> {
@@ -76,8 +80,8 @@ export class ChatCache {
       { statement: 'DELETE FROM cached_turns WHERE server_id=? AND chat_id=?', values: key },
       {
         statement: `INSERT OR REPLACE INTO cached_chats
-          (server_id, chat_id, title, cwd, status, revision, next_cursor, has_more) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        values: [...key, page.title || '未命名对话', page.cwd, page.status, revision, page.nextCursor, page.hasMore ? 1 : 0],
+          (server_id, chat_id, title, cwd, status, revision, next_cursor, has_more, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        values: [...key, page.title || '未命名对话', page.cwd, page.status, revision, page.nextCursor, page.hasMore ? 1 : 0, JSON.stringify(page.origin ?? null)],
       },
     ];
     page.turns.slice(-10).forEach((turn, position) => {

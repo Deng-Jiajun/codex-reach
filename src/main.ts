@@ -6,6 +6,7 @@ import { ReachClient, ReachError } from './api';
 import { ChatCache } from './cache';
 import { mergeHistory, mergeTail, prependHistory } from './sync';
 import { groupMessages, groupProcessMessages, type MessageGroup, type ProcessGroup } from './transcript';
+import type { ThreadNavigation } from './thread-links';
 import { populateParameters, selectedParameters, updateThinking } from './task-options';
 import { renderRequests, renderAsyncQuestions, type PendingRequest } from './requests';
 import { openFilePicker, openAttachmentManager, renderAttachments, type FileAttachment } from './files';
@@ -127,6 +128,22 @@ let archivedList = false;
 let grouping: Grouping = (['date', 'project', 'status'].includes(localStorage.getItem('codex-reach-grouping') ?? '')
   ? localStorage.getItem('codex-reach-grouping') : 'date') as Grouping;
 let selected: HistoryPage | null = null;
+type ChatVisit = { page: HistoryPage; pinned?: boolean; top: number; latest: boolean; anchor?: { key: string; offset: number }; expanded: boolean; disclosures: string[] };
+const chatTrail: ChatVisit[] = [];
+let referenceError = '';
+const threadTitles = new Map<string, Promise<string>>();
+const threadNavigation: ThreadNavigation = {
+  open: id => { void openRelatedChat(id); },
+  title: id => {
+    let request = threadTitles.get(id);
+    if (!request) {
+      request = client ? client.request<ThreadReference>(`/threads/${encodeURIComponent(id)}/reference`).then(threadTitle)
+        : Promise.reject(new Error('尚未连接电脑'));
+      threadTitles.set(id, request);
+    }
+    return request;
+  },
+};
 let revision: string | null = null;
 let generation = 0;
 let foreground = true;
@@ -247,9 +264,80 @@ function closeSettings(): void {
 }
 
 function backToInbox(): void {
+  chatTrail.length = 0;
   stopUpdates();
   showView('inbox');
   void refreshInbox();
+}
+
+function disclosureKey(node: HTMLDetailsElement): string {
+  return `${node.className}:${node.querySelector<HTMLElement>('[data-message-id]')?.dataset.messageId ?? ''}`;
+}
+
+function captureChatVisit(): ChatVisit {
+  const top = scroll.getBoundingClientRect().top;
+  const anchor = [...renderedMessages].find(([, node]) => {
+    const rect = node.getBoundingClientRect();
+    return rect.height > 0 && rect.bottom > top && rect.top < top + scroll.clientHeight;
+  });
+  return { page: { ...selected! }, pinned: selectedPinned, top: scroll.scrollTop, latest: followLatest,
+    anchor: anchor ? { key: anchor[0], offset: anchor[1].getBoundingClientRect().top - top } : undefined,
+    expanded: element('message-form').classList.contains('expanded'),
+    disclosures: [...element('messages').querySelectorAll<HTMLDetailsElement>('details[open]')].map(disclosureKey) };
+}
+
+function restoreChatVisit(visit: ChatVisit): void {
+  for (const node of element('messages').querySelectorAll<HTMLDetailsElement>('details')) node.open = visit.disclosures.includes(disclosureKey(node));
+  const anchor = visit.anchor && renderedMessages.get(visit.anchor.key);
+  scroll.scrollTop = visit.latest ? scroll.scrollHeight : visit.top;
+  if (!visit.latest && anchor && visit.anchor) scroll.scrollTop += anchor.getBoundingClientRect().top - scroll.getBoundingClientRect().top - visit.anchor.offset;
+  followLatest = visit.latest;
+  restoringScroll = visit.latest ? null : scroll.scrollTop;
+  updateReadingActions();
+}
+
+async function backFromChat(): Promise<void> {
+  const visit = chatTrail.pop();
+  if (visit) await openChat(visit.page.id, visit.pinned, { related: true, returnTo: visit });
+  else backToInbox();
+}
+
+async function openRelatedChat(id: string, createdChild?: string): Promise<void> {
+  if (!selected || selected.id === id) return;
+  for (const dialog of document.querySelectorAll<HTMLDialogElement>('dialog[open]')) dialog.close();
+  const visit = [...chatTrail].reverse().find(item => item.page.id === id);
+  chatTrail.push(captureChatVisit());
+  await openChat(id, visit?.pinned, { related: true, returnTo: visit });
+  if (selected?.id !== id || !createdChild) return;
+  for (const node of renderedMessages.values()) {
+    const link = [...node.querySelectorAll<HTMLButtonElement>('.thread-link[data-thread-id]')].find(item => item.dataset.threadId === createdChild);
+    if (!link) continue;
+    let ancestor: HTMLElement | null = node;
+    while (ancestor) { if (ancestor instanceof HTMLDetailsElement) ancestor.open = true; ancestor = ancestor.parentElement; }
+    restoringScroll = null;
+    followLatest = false;
+    link.scrollIntoView({ block: 'center' });
+    node.classList.add('search-highlight');
+    setTimeout(() => node.classList.remove('search-highlight'), 3000);
+    break;
+  }
+}
+
+async function loadThreadReference(id: string, token: number): Promise<void> {
+  if (!client) return;
+  try {
+    const reference = await client.request<ThreadReference & { origin: ThreadReference | null }>(`/threads/${encodeURIComponent(id)}/reference?origin=true`);
+    if (token !== generation || selected?.id !== id) return;
+    selected.origin = reference.origin;
+    if (reference.title) selected.title = reference.title;
+    referenceError = '';
+    renderChat();
+    scheduleCache();
+  } catch (error) {
+    if (token !== generation || selected?.id !== id) return;
+    referenceError = errorText(error);
+    renderChat();
+  }
 }
 
 async function connect(): Promise<void> {
@@ -274,6 +362,7 @@ async function connect(): Promise<void> {
     pinRequests.clear();
     pinRevisions.clear();
     if (!sameServer) {
+      chatTrail.length = 0;
       projects = [];
       modelChoices = [];
       selectedPinned = undefined;
@@ -719,9 +808,13 @@ async function reportReadError(error: unknown, token: number, kind: 'history' | 
   renderChat();
 }
 
-async function openChat(id: string, pinned?: boolean): Promise<void> {
-  followLatest = true;
-  restoringScroll = null;
+async function openChat(id: string, pinned?: boolean, options: { related?: boolean; returnTo?: ChatVisit } = {}): Promise<void> {
+  const visit = options.returnTo;
+  if (!options.related) chatTrail.length = 0;
+  followLatest = visit?.latest ?? true;
+  restoringScroll = visit && !visit.latest ? visit.top : null;
+  referenceError = '';
+  threadTitles.clear();
   readAttempts.delete(id);
   stopUpdates();
   const token = generation;
@@ -730,7 +823,7 @@ async function openChat(id: string, pinned?: boolean): Promise<void> {
   liveRequests = [];
   liveModel = '';
   liveThinking = '';
-  historyLoaded = false;
+  historyLoaded = Boolean(visit);
   opening = true;
   syncing = true;
   clearRuntimeStatus();
@@ -739,7 +832,7 @@ async function openChat(id: string, pinned?: boolean): Promise<void> {
   renderedMessages.clear();
   const thread = threads.find(item => item.id === id);
   selectedPinned = pinned ?? (thread ? Boolean(thread.pinned) : undefined);
-  selected = { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
+  selected = visit ? { ...visit.page } : { id, title: thread?.title || '未命名对话', cwd: thread?.cwd ?? '', status: thread?.status ?? '', turns: [], hasMore: false, nextCursor: null };
   pending = readStored(storageKey('pending', id));
   stopOperation = readStored(storageKey('stop', id));
   interaction = readStored(storageKey('interaction', id));
@@ -753,22 +846,25 @@ async function openChat(id: string, pinned?: boolean): Promise<void> {
   questionDrafts = readStored<QuestionReply[]>(storageKey('question-drafts', id)) ?? pending?.questionReplies ?? [];
   turnOptions = readStored<TurnOptions>(storageKey('options', id)) ?? {};
   messageInput.value = localStorage.getItem(storageKey('draft', id)) ?? '';
+  element('message-form').classList.toggle('expanded', visit?.expanded ?? false);
   localStorage.setItem(storageKey('last-chat'), id);
   showView('chat');
   resizeInput();
-  renderChat(true);
+  renderChat(!visit);
+  if (visit) restoreChatVisit(visit);
   if (selectedPinned === undefined && connected) void togglePin(id);
   try {
-    const saved = connection ? await cache.load(connection.serverId, id).catch(error => {
+    const saved = connection && !visit ? await cache.load(connection.serverId, id).catch(error => {
       if (token === generation) inform(`本地缓存读取失败。${errorText(error)}`);
       return null;
     }) : null;
     if (token !== generation) return;
     if (saved) { selected = saved; renderChat(true); }
+    void loadThreadReference(id, token);
     await refreshHistory(id, token);
     if (token !== generation) return;
     if (connected && !historyError) inform();
-    renderChat(true);
+    renderChat(!visit);
     if (pending) void checkReceipt(token).catch(error => { if (token === generation) inform(errorText(error)); });
     if (stopOperation) void checkStopReceipt(token);
     if (interaction) void checkInteractionReceipt(token);
@@ -885,7 +981,7 @@ async function showAnnotationSource(annotation: ResponseAnnotation): Promise<voi
   close.addEventListener('click', () => dialog.close());
   const content = document.createElement('div');
   content.className = 'message-content';
-  renderMarkdown(content, source.text, source.requestAnnotations ?? [], client, () => {}, selected?.cwd);
+  renderMarkdown(content, source.text, source.requestAnnotations ?? [], client, () => {}, selected?.cwd, threadNavigation);
   const header = document.createElement('div'); header.className = 'dialog-header';
   const title = document.createElement('h2'); title.textContent = '引用来源';
   header.append(title, close);
@@ -967,7 +1063,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
   if (node.dataset.body !== body || node.dataset.annotationKey !== annotationKey) {
     content.hidden = !body.trim();
     if (message.kind === 'user' || message.kind === 'tool') content.textContent = body;
-    else renderMarkdown(content, body, annotations, client, (annotation, index) => openAnnotationDetail(annotation, index, showAnnotationSource), selected?.cwd);
+    else renderMarkdown(content, body, annotations, client, (annotation, index) => openAnnotationDetail(annotation, index, showAnnotationSource), selected?.cwd, threadNavigation);
     node.dataset.body = body;
     node.dataset.annotationKey = annotationKey;
   }
@@ -1071,6 +1167,12 @@ function renderChat(forceBottom = false): void {
   const previousTop = scroll.scrollTop;
   element('chat-title').textContent = threadTitle(selected);
   element('chat-title').title = threadTitle(selected);
+  element('back-button').setAttribute('aria-label', chatTrail.length ? '返回上个对话' : '返回对话列表');
+  const origin = selected.origin;
+  const sourceButton = element<HTMLButtonElement>('source-thread');
+  sourceButton.hidden = !origin && (!referenceError || !connected);
+  sourceButton.textContent = origin ? `来自：${origin.title ? threadTitle(origin) : '来源对话'} ›` : '来源信息读取失败 · 点击重试';
+  sourceButton.title = referenceError || origin?.title || '';
   element('chat-meta').textContent = [selected.cwd, liveModel, liveThinking].filter(Boolean).join(' · ');
   renderTaskState(element('chat-state'), liveWaiting ? '待处理' : stateLabel(runtimeStatus ?? ''));
   element('chat-state').dataset.status = runtimeStatus ?? '';
@@ -1185,7 +1287,7 @@ function renderChat(forceBottom = false): void {
     try {
       const message = await loadAnnotationSource(annotation);
       const content = document.createElement('div');
-      renderMarkdown(content, message.text, message.requestAnnotations ?? [], client, () => {}, selected?.cwd);
+      renderMarkdown(content, message.text, message.requestAnnotations ?? [], client, () => {}, selected?.cwd, threadNavigation);
       const nativeRange = annotation.source!.contentOffsets ?? annotation.source!;
       const range = sourceRange(content, nativeRange.startOffset, nativeRange.endOffset);
       if (!range) throw new Error('来源位置已变化');
@@ -2034,7 +2136,11 @@ document.addEventListener('click', event => {
   void openReader(link.href, client, selected?.cwd).catch(error => inform(errorText(error)));
 });
 element('cancel-settings').addEventListener('click', closeSettings);
-element('back-button').addEventListener('click', backToInbox);
+element('back-button').addEventListener('click', () => void backFromChat());
+element('source-thread').addEventListener('click', () => {
+  if (selected?.origin) void openRelatedChat(selected.origin.id, selected.id);
+  else if (selected) void loadThreadReference(selected.id, generation);
+});
 element('reconnect-button').addEventListener('click', () => {
   if (currentView === 'chat') resumeChat();
   else void refreshInbox();
@@ -2205,7 +2311,7 @@ if (Capacitor.getPlatform() === 'android') {
   void App.addListener('backButton', () => {
     if (closeTopDialog()) return;
     else if (selectionToolbar.dismiss()) return;
-    else if (currentView === 'chat') backToInbox();
+    else if (currentView === 'chat') void backFromChat();
     else if (currentView === 'connection' && settingsReturnView) closeSettings();
     else void App.minimizeApp();
   });

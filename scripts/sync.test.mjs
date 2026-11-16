@@ -5,6 +5,14 @@ import { mergeHistory, mergeTail, prependHistory } from '../src/sync.ts';
 const turn = id => ({ id, status: 'completed', messages: [] });
 const page = (ids, nextCursor) => ({ id: 'chat', title: 'Chat', cwd: '', status: 'idle', turns: ids.map(turn), nextCursor, hasMore: nextCursor !== null });
 
+test('history refreshes and older pages retain separately loaded creation origin', () => {
+  const origin = { id: 'source', title: '来源对话' };
+  const current = { ...page(['latest'], 'older'), origin };
+  assert.deepEqual(mergeHistory(current, page(['latest', 'new'], 'older')).origin, origin);
+  assert.deepEqual(prependHistory(current, page(['older'], null)).origin, origin);
+  assert.equal(mergeHistory(current, { ...page(['latest'], null), origin: null }).origin, null);
+});
+
 test('refreshing the tail preserves the cursor for already loaded older history', () => {
   const current = page(['older', 'anchor', 'latest'], 'before-older');
   const refreshed = page(['anchor', 'latest', 'new'], 'before-anchor');

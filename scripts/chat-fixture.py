@@ -148,6 +148,10 @@ organization_files = {
 }
 
 
+NAVIGATION_SOURCE = "11111111-1111-4111-8111-111111111111"
+NAVIGATION_CHILD = "22222222-2222-4222-8222-222222222222"
+
+
 def initial_organization_state():
     return {
         "receipts": {}, "pinRequests": [],
@@ -165,6 +169,19 @@ def initial_organization_state():
                 {"id": "organization-command", "kind": "tool", "text": "rg -n pattern example.cpp\n找到对应处理分支", "phase": None},
                 {"id": "organization-command-2", "kind": "tool", "text": "查看相关函数实现", "phase": None},
                 {"id": "organization-answer", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n第二行可引用\n\n[HTML 阅读](C:/Example/mobile.html)\n[PDF 阅读](C:/Example/mobile.pdf)", "phase": "final_answer"},
+            ]}],
+        }, NAVIGATION_SOURCE: {
+            "id": NAVIGATION_SOURCE, "title": "新对话来源验证", "cwd": "C:/Example", "revision": 1,
+            "turns": [{"id": "navigation-source-turn", "status": "completed", "messages": [
+                {"id": "navigation-before", "kind": "assistant", "text": "QUOTE_SOURCE_LINE\n\n" + "来源对话的阅读内容。\n\n" * 18, "phase": "final_answer"},
+                {"id": "navigation-created", "kind": "assistant", "text": '已创建对话。\n\n::created-thread{threadId="' + NAVIGATION_CHILD + '"}', "phase": "final_answer"},
+                {"id": "navigation-after", "kind": "assistant", "text": "创建后的阅读内容。\n\n" * 18, "phase": "final_answer"},
+            ]}],
+        }, NAVIGATION_CHILD: {
+            "id": NAVIGATION_CHILD, "title": "新建对话跳转验证", "cwd": "C:/Example", "revision": 1,
+            "origin": {"id": NAVIGATION_SOURCE, "title": "新对话来源验证"},
+            "turns": [{"id": "navigation-child-turn", "status": "completed", "messages": [
+                {"id": "navigation-child-answer", "kind": "assistant", "text": "子对话正文。", "phase": "final_answer"},
             ]}],
         }},
     }
@@ -318,6 +335,10 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"projects": [{"id": "fixture-project", "name": "验证项目", "path": "C:\\Example"}]}
             elif url.path == "/api/models":
                 result = {"models": models}
+            elif url.path.startswith("/api/threads/") and url.path.endswith("/reference"):
+                chat_id = url.path.split("/")[3]
+                chat = organization_state["threads"].get(chat_id, {})
+                result = {"id": chat_id, "title": chat.get("title", ""), "origin": chat.get("origin")}
             elif url.path == "/api/files":
                 path = parse_qs(url.query).get("path", [None])[0]
                 organization_state["fileQueries"].append(path)
@@ -325,7 +346,7 @@ class Handler(BaseHTTPRequestHandler):
                 if result is None:
                     self.reply({"error": "合成目录不存在"}, 404)
                     return
-            elif url.path.startswith("/api/threads/fixture-organization") and url.path.endswith("/pin"):
+            elif url.path.startswith("/api/threads/") and url.path.split("/")[3] in organization_state["threads"] and url.path.endswith("/pin"):
                 chat_id = url.path.split("/")[3]
                 result = {"pinned": organization_state["pinned"].get(chat_id, False)}
             elif url.path.endswith("/settings"):
@@ -344,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
                     result["threads"].append({"id": chat["id"], "title": chat["title"], "projectId": "fixture-project",
                         "cwd": chat["cwd"], "status": "idle", "updatedAt": 1794326400,
                         "pinned": organization_state["pinned"].get(chat["id"], False)})
-            elif url.path.startswith("/api/threads/fixture-organization") and url.path.endswith(("/history", "/live")):
+            elif url.path.startswith("/api/threads/") and url.path.split("/")[3] in organization_state["threads"] and url.path.endswith(("/history", "/live")):
                 chat_id = url.path.split("/")[3]
                 chat = organization_state["threads"].get(chat_id)
                 if chat is None:

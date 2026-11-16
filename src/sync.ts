@@ -24,6 +24,7 @@ export function mergeHistory(current: HistoryPage, incoming: HistoryPage): Histo
     || (turns[0]?.messages.length ?? 0) > (incoming.turns[0]?.messages.length ?? 0));
   return {
     ...incoming,
+    origin: incoming.origin === undefined ? current.origin : incoming.origin,
     title: incoming.title || current.title || '未命名对话',
     turns: turns ?? incoming.turns,
     nextCursor: retainedOlder ? current.nextCursor : incoming.nextCursor,

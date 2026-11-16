@@ -42,6 +42,7 @@ public class OrganizationFlowTest {
             WebView webView = view.get();
             connectIfNeeded(webView);
             if (stage.equals("organization")) {
+                verifyThreadNavigation(webView);
                 openThread(webView, SOURCE_ID, "组织与附件验证");
                 verifyProcessGroup(webView);
                 verifyPin(webView);
@@ -83,6 +84,43 @@ public class OrganizationFlowTest {
         SystemClock.sleep(700);
         assertEquals("true", evaluate(webView, "[...document.querySelectorAll('.process-records')].every(group=>group.open && group.querySelectorAll('.record-messages > .message').length===2 && !group.querySelector('.message details'))"));
         evaluate(webView, "document.querySelector('.turn-process > summary').click(); null");
+    }
+
+    private void verifyThreadNavigation(WebView webView) throws Exception {
+        String source = "11111111-1111-4111-8111-111111111111";
+        String child = "22222222-2222-4222-8222-222222222222";
+        String link = ".thread-link[data-thread-id='" + child + "']";
+        openThread(webView, source, "新对话来源验证");
+        setComposer(webView, "来源草稿");
+        await(webView, "document.querySelector('.thread-link')?.textContent.includes('新建对话跳转验证') && document.querySelector('#history-status').hidden");
+        evaluate(webView, "document.querySelector('.thread-link').scrollIntoView({block:'center'}); null");
+        SystemClock.sleep(200);
+        double previousTop = Double.parseDouble(evaluate(webView, "document.querySelector('#messages-scroll').scrollTop"));
+        pressElement(webView, link, false);
+        await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证' && !document.querySelector('#source-thread').hidden && document.querySelector('#history-status').hidden");
+        assertEquals("true", evaluate(webView, "document.querySelector('#source-thread').textContent.includes('来自：新对话来源验证') && document.querySelector('#source-thread').getBoundingClientRect().height>=48"));
+        setComposer(webView, "子对话草稿");
+        InstrumentationRegistry.getInstrumentation().sendKeyDownUpSync(KeyEvent.KEYCODE_BACK);
+        await(webView, "document.querySelector('#chat-title').textContent==='新对话来源验证' && document.querySelector('#history-status').hidden");
+        assertComposer(webView, "来源草稿");
+        double restoredTop = Double.parseDouble(evaluate(webView, "document.querySelector('#messages-scroll').scrollTop"));
+        assertTrue("Cross-chat back restores reading position", Math.abs(previousTop - restoredTop) < 3);
+        pressElement(webView, link, false);
+        await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证' && !document.querySelector('#source-thread').hidden");
+        assertComposer(webView, "子对话草稿");
+        pressElement(webView, "#source-thread", false);
+        await(webView, "document.querySelector('#chat-title').textContent==='新对话来源验证' && Boolean(document.querySelector('[data-message-id=navigation-created].search-highlight'))");
+        pressElement(webView, "#back-button", false);
+        await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证'");
+        assertComposer(webView, "子对话草稿");
+        pressElement(webView, "#back-button", false);
+        await(webView, "document.querySelector('#chat-title').textContent==='新对话来源验证'");
+        pressElement(webView, "#back-button", false);
+        await(webView, "!document.querySelector('#inbox-view').hidden && document.querySelector('#refresh-indicator').getAttribute('aria-busy')!=='true'");
+        evaluate(webView, "document.querySelector('#inbox-view [data-thread-id=\"" + child + "\"]').click(); null");
+        await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证' && !document.querySelector('#source-thread').hidden");
+        assertComposer(webView, "子对话草稿");
+        captureScreenshot("thread-navigation");
     }
 
     private void verifyPin(WebView webView) throws Exception {

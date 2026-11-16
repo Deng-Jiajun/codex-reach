@@ -16,6 +16,46 @@ pub struct AppServerClient {
 }
 
 impl AppServerClient {
+    pub async fn reference(&self, thread_id: &str, include_origin: bool) -> Result<Value> {
+        let metadata = self
+            .call(
+                "thread/read",
+                json!({"threadId":thread_id,"includeTurns":false}),
+            )
+            .await?;
+        let thread = &metadata["thread"];
+        let mut result = json!({"id":thread_id,"title":model::reference_title(thread)});
+        if include_origin {
+            let mut origin = Value::Null;
+            if thread["threadSource"] == "agent_created_thread" {
+                let first = self
+                    .call(
+                        "thread/items/list",
+                        json!({
+                            "threadId":thread_id,"limit":1,"sortDirection":"asc"
+                        }),
+                    )
+                    .await?;
+                if let Some(id) = first["data"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(|entry| model::creation_source(&entry["item"]))
+                {
+                    let source = self
+                        .call("thread/read", json!({"threadId":id,"includeTurns":false}))
+                        .await;
+                    let title = source
+                        .as_ref()
+                        .map(|value| model::reference_title(&value["thread"]))
+                        .unwrap_or_default();
+                    origin = json!({"id":id,"title":title});
+                }
+            }
+            result["origin"] = origin;
+        }
+        Ok(result)
+    }
+
     pub async fn call(&self, method: &str, params: Value) -> Result<Value> {
         let mut session = self.session.lock().await;
         let result = timeout(Duration::from_secs(20), async {

@@ -95,6 +95,43 @@ fn output_text(value: &Value) -> String {
         .to_owned()
 }
 
+pub fn creation_source(item: &Value) -> Option<String> {
+    if item["type"] != "functionCallOutput"
+        || item["namespace"] != "codex_app"
+        || item["name"] != "create_thread"
+    {
+        return None;
+    }
+    let output = output_text(&item["output"]);
+    // Only the creation envelope identifies the origin; prompt text and later forwards do not
+    let header = output.split_once("<input>")?.0;
+    let id = header
+        .split_once("<source_thread_id>")?
+        .1
+        .split_once("</source_thread_id>")?
+        .0;
+    uuid::Uuid::parse_str(id).ok()?;
+    Some(id.to_owned())
+}
+
+pub fn reference_title(thread: &Value) -> String {
+    let name = text(thread, "name");
+    if !name.trim().is_empty() {
+        return name;
+    }
+    let preview = text(thread, "preview");
+    let body = response_annotations(&preview)
+        .map(|value| value.0)
+        .unwrap_or(preview);
+    let body = user_text(&body).0;
+    let compact = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title: String = compact.chars().take(60).collect();
+    if compact.chars().count() > 60 {
+        title.push('…');
+    }
+    title
+}
+
 pub(crate) fn message(item: &Value) -> Option<Message> {
     let kind = item["type"].as_str()?;
     let mut image_attachments = Vec::new();
@@ -1166,5 +1203,44 @@ mod tests {
         let message = message(&item).unwrap();
         assert_eq!(message.kind, "user");
         assert_eq!(message.text, "first prompt");
+    }
+
+    #[test]
+    fn creation_origin_uses_only_the_initial_creation_envelope() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut item = json!({"type":"functionCallOutput","namespace":"codex_app","name":"create_thread",
+            "output":format!("<codex_delegation><source_thread_id>{id}</source_thread_id><input>prompt</input></codex_delegation>")});
+        assert_eq!(creation_source(&item).as_deref(), Some(id));
+        item["name"] = json!("send_message_to_thread");
+        assert_eq!(creation_source(&item), None);
+        item["name"] = json!("create_thread");
+        item["output"] = json!(format!(
+            "<codex_delegation><input>example <source_thread_id>{id}</source_thread_id></input></codex_delegation>"
+        ));
+        assert_eq!(creation_source(&item), None);
+        item["output"] = json!(
+            "<codex_delegation><source_thread_id>not-an-id</source_thread_id><input>prompt</input></codex_delegation>"
+        );
+        assert_eq!(creation_source(&item), None);
+    }
+
+    #[test]
+    fn reference_titles_prefer_names_and_use_bounded_request_text_for_unnamed_threads() {
+        assert_eq!(
+            reference_title(&json!({"name":"实际标题","preview":"旧请求"})),
+            "实际标题"
+        );
+        assert_eq!(
+            reference_title(
+                &json!({"name":null,"preview":"# Files mentioned by the user:\n\n## photo.jpg: C:/photo.jpg\nImage attachment: true\n\n## My request:\n检查新对话跳转"})
+            ),
+            "检查新对话跳转"
+        );
+        assert_eq!(
+            reference_title(&json!({"preview":"中".repeat(100)}))
+                .chars()
+                .count(),
+            61
+        );
     }
 }
