@@ -945,14 +945,21 @@ async fn thread_reference(
         .map_err(|error| ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryQuery {
+    cursor: Option<String>,
+    created_child: Option<String>,
+}
+
 async fn history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(query): Query<PageQuery>,
+    Query(query): Query<HistoryQuery>,
 ) -> Result<Json<Value>, ApiError> {
     state
         .app_server
-        .history(&id, query.cursor)
+        .history(&id, query.cursor, query.created_child)
         .await
         .map(Json)
         .map_err(|error| ApiError(StatusCode::UNPROCESSABLE_ENTITY, error.to_string()))

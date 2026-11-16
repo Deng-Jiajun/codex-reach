@@ -73,7 +73,12 @@ impl AppServerClient {
         result
     }
 
-    pub async fn history(&self, thread_id: &str, cursor: Option<String>) -> Result<Value> {
+    pub async fn history(
+        &self,
+        thread_id: &str,
+        cursor: Option<String>,
+        created_child: Option<String>,
+    ) -> Result<Value> {
         let metadata = self
             .call(
                 "thread/read",
@@ -112,11 +117,16 @@ impl AppServerClient {
                 .unwrap_or(Value::Null);
             model::associate_annotations(turn, model::annotations_from_input(&input));
         }
-        Ok(json!({
+        let mut result = json!({
             "id":thread_id,"title":model::text(thread,"name"),"cwd":thread["cwd"],
             "status":model::status(&thread["status"]),"turns":turns,
             "nextCursor":page["nextCursor"],"hasMore":page["nextCursor"].is_string()
-        }))
+        });
+        if let Some(child) = created_child {
+            result["creationLocation"] =
+                model::creation_location(&page, &child).unwrap_or(Value::Null);
+        }
+        Ok(result)
     }
 }
 

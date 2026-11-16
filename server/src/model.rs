@@ -114,6 +114,28 @@ pub fn creation_source(item: &Value) -> Option<String> {
     Some(id.to_owned())
 }
 
+pub fn creation_location(page: &Value, child_id: &str) -> Option<Value> {
+    page["data"].as_array()?.iter().find_map(|entry| {
+        let item = &entry["item"];
+        if item["type"] != "mcpToolCall" || item["tool"] != "create_thread" {
+            return None;
+        }
+        let result = &item["result"];
+        let matches = result["structuredContent"]["threadId"] == child_id
+            || result["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|content| {
+                    content["type"] == "text"
+                        && serde_json::from_str::<Value>(&text(content, "text"))
+                            .is_ok_and(|value| value["threadId"] == child_id)
+                });
+        (matches && entry["turnId"].is_string() && item["id"].is_string())
+            .then(|| json!({"turnId":entry["turnId"],"messageId":item["id"]}))
+    })
+}
+
 pub fn reference_title(thread: &Value) -> String {
     let name = text(thread, "name");
     if !name.trim().is_empty() {
@@ -1222,6 +1244,28 @@ mod tests {
             "<codex_delegation><source_thread_id>not-an-id</source_thread_id><input>prompt</input></codex_delegation>"
         );
         assert_eq!(creation_source(&item), None);
+    }
+
+    #[test]
+    fn creation_location_uses_exact_tool_result_not_mentions_or_forwarding() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut page = json!({"data":[
+            {"turnId":"later","item":{"id":"quote","type":"agentMessage","text":format!("::created-thread{{threadId=\"{id}\"}}")}},
+            {"turnId":"later","item":{"id":"forward","type":"mcpToolCall","tool":"send_message_to_thread","result":{"structuredContent":{"threadId":id}}}},
+            {"turnId":"creation","item":{"id":"create","type":"mcpToolCall","tool":"create_thread","result":{"content":[{"type":"text","text":json!({"threadId":id,"hostId":"local"}).to_string()}]}}}
+        ]});
+        assert_eq!(
+            creation_location(&page, id),
+            Some(json!({"turnId":"creation","messageId":"create"}))
+        );
+        assert_eq!(
+            creation_location(&page, "22222222-2222-4222-8222-222222222222"),
+            None
+        );
+        page["data"][2]["item"]["result"] = json!({"content":[{"type":"text","text":format!("example {id}")}],"structuredContent":{"clientThreadId":id}});
+        assert_eq!(creation_location(&page, id), None);
+        page["data"][2]["item"]["result"] = json!({"structuredContent":{"threadId":id}});
+        assert_eq!(creation_location(&page, id).unwrap()["turnId"], "creation");
     }
 
     #[test]

@@ -109,7 +109,7 @@ public class OrganizationFlowTest {
         await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证' && !document.querySelector('#source-thread').hidden");
         assertComposer(webView, "子对话草稿");
         pressElement(webView, "#source-thread", false);
-        await(webView, "document.querySelector('#chat-title').textContent==='新对话来源验证' && Boolean(document.querySelector('[data-message-id=navigation-created].search-highlight'))");
+        await(webView, "document.querySelector('#chat-title').textContent==='新对话来源验证' && Boolean(document.querySelector('[data-message-id=navigation-create-tool].search-highlight'))");
         pressElement(webView, "#back-button", false);
         await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证'");
         assertComposer(webView, "子对话草稿");
@@ -120,7 +120,13 @@ public class OrganizationFlowTest {
         evaluate(webView, "document.querySelector('#inbox-view [data-thread-id=\"" + child + "\"]').click(); null");
         await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证' && !document.querySelector('#source-thread').hidden");
         assertComposer(webView, "子对话草稿");
+        pressElement(webView, "#source-thread", false);
+        await(webView, "Boolean(document.querySelector('[data-message-id=navigation-create-tool].search-highlight'))");
+        assertEquals("Source creation is visible after loading older history", "true", evaluate(webView, "(()=>{const n=document.querySelector('[data-message-id=navigation-create-tool]');const r=n.getBoundingClientRect();const s=document.querySelector('#messages-scroll').getBoundingClientRect();return r.height>0&&r.top>=s.top&&r.bottom<=s.bottom})()"));
         captureScreenshot("thread-navigation");
+        pressElement(webView, "#back-button", false);
+        await(webView, "document.querySelector('#chat-title').textContent==='新建对话跳转验证'");
+        assertComposer(webView, "子对话草稿");
     }
 
     private void verifyPin(WebView webView) throws Exception {

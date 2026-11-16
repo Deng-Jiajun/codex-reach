@@ -375,11 +375,24 @@ class Handler(BaseHTTPRequestHandler):
                     if parse_qs(url.query).get("after", [None])[0] == str(chat["revision"]):
                         condition.wait(timeout=0.4)
                     result = {"available": True, "revision": str(chat["revision"]), "turns": chat["turns"],
-                        "complete": True, "status": "idle", "activeTurnId": None, "requests": [], "waiting": False,
+                        "complete": chat_id != NAVIGATION_SOURCE, "status": "idle", "activeTurnId": None, "requests": [], "waiting": False,
                         "editableTurn": None, "model": "fixture-standard", "thinking": "low"}
                 else:
                     result = {"id": chat_id, "title": chat["title"], "cwd": chat["cwd"], "status": "idle",
                         "turns": chat["turns"], "nextCursor": None, "hasMore": False}
+                    query = parse_qs(url.query)
+                    if chat_id == NAVIGATION_SOURCE:
+                        older = query.get("cursor") == ["creation-page"]
+                        result["hasMore"] = not older
+                        result["nextCursor"] = None if older else "creation-page"
+                        if older:
+                            result["turns"] = [{"id": "navigation-creation-turn", "status": "completed", "messages": [
+                                {"id": "navigation-request", "kind": "user", "text": "请创建评估对话。", "phase": None},
+                                {"id": "navigation-create-tool", "kind": "tool", "text": "codex_app · create_thread · completed", "phase": None},
+                                {"id": "navigation-original", "kind": "assistant", "text": "创建完成。", "phase": "final_answer"},
+                            ]}]
+                        if query.get("createdChild") == [NAVIGATION_CHILD]:
+                            result["creationLocation"] = {"turnId": "navigation-creation-turn", "messageId": "navigation-create-tool"} if older else None
             elif url.path in ("/api/threads/fixture-interactions/history", "/api/threads/fixture-interactions/live"):
                 if url.path.endswith("/live"):
                     if parse_qs(url.query).get("after", [None])[0] == str(interaction_state["revision"]):

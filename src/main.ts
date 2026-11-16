@@ -81,6 +81,7 @@ let historyLoaded = false;
 let opening = false;
 let syncing = false;
 let olderLoading = false;
+let locatingSource = false;
 let moreLoading = false;
 let historyRequest = 0;
 let runtimeStatus: string | null = null;
@@ -219,6 +220,7 @@ function stopUpdates(): void {
   renderRefresh();
   opening = false;
   olderLoading = false;
+  locatingSource = false;
   moreLoading = false;
 }
 
@@ -307,19 +309,50 @@ async function openRelatedChat(id: string, createdChild?: string): Promise<void>
   for (const dialog of document.querySelectorAll<HTMLDialogElement>('dialog[open]')) dialog.close();
   const visit = [...chatTrail].reverse().find(item => item.page.id === id);
   chatTrail.push(captureChatVisit());
-  await openChat(id, visit?.pinned, { related: true, returnTo: visit });
-  if (selected?.id !== id || !createdChild) return;
-  for (const node of renderedMessages.values()) {
-    const link = [...node.querySelectorAll<HTMLButtonElement>('.thread-link[data-thread-id]')].find(item => item.dataset.threadId === createdChild);
-    if (!link) continue;
-    let ancestor: HTMLElement | null = node;
-    while (ancestor) { if (ancestor instanceof HTMLDetailsElement) ancestor.open = true; ancestor = ancestor.parentElement; }
-    restoringScroll = null;
-    followLatest = false;
-    link.scrollIntoView({ block: 'center' });
-    node.classList.add('search-highlight');
-    setTimeout(() => node.classList.remove('search-highlight'), 3000);
-    break;
+  await openChat(id, visit?.pinned, { related: true, returnTo: visit, createdChild });
+}
+
+async function locateCreation(id: string, child: string, token: number): Promise<void> {
+  if (!client || !selected || historyError) return;
+  const api = client;
+  locatingSource = true;
+  followLatest = false;
+  restoringScroll = null;
+  renderChat();
+  let cursor: string | null = null;
+  let history: HistoryPage | null = null;
+  try {
+    do {
+      const query = new URLSearchParams({ createdChild: child });
+      if (cursor) query.set('cursor', cursor);
+      const page = await api.request<HistoryPage>(`/threads/${encodeURIComponent(id)}/history?${query}`);
+      if (token !== generation || selected?.id !== id) return;
+      history = history ? prependHistory(history, page) : page;
+      selected = mergeHistory(selected, history);
+      renderChat();
+      scheduleCache();
+      const location = page.creationLocation;
+      if (location) {
+        const node = renderedMessages.get(`${location.turnId}:${location.messageId}`);
+        if (!node) throw new Error('创建记录无法显示');
+        let ancestor: HTMLElement | null = node;
+        while (ancestor) { if (ancestor instanceof HTMLDetailsElement) ancestor.open = true; ancestor = ancestor.parentElement; }
+        for (const detail of node.querySelectorAll('details')) detail.open = true;
+        followLatest = false;
+        restoringScroll = null;
+        node.scrollIntoView({ block: 'center' });
+        node.classList.add('search-highlight');
+        setTimeout(() => node.classList.remove('search-highlight'), 3000);
+        updateReadingActions();
+        return;
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    inform('未找到创建这段对话的记录，可能已被删除或替换。');
+  } catch (error) {
+    if (token === generation && selected?.id === id) inform(`来源轮次定位失败。${errorText(error)} 可返回后重试。`);
+  } finally {
+    if (token === generation) { locatingSource = false; renderChat(); }
   }
 }
 
@@ -808,7 +841,7 @@ async function reportReadError(error: unknown, token: number, kind: 'history' | 
   renderChat();
 }
 
-async function openChat(id: string, pinned?: boolean, options: { related?: boolean; returnTo?: ChatVisit } = {}): Promise<void> {
+async function openChat(id: string, pinned?: boolean, options: { related?: boolean; returnTo?: ChatVisit; createdChild?: string } = {}): Promise<void> {
   const visit = options.returnTo;
   if (!options.related) chatTrail.length = 0;
   followLatest = visit?.latest ?? true;
@@ -865,6 +898,8 @@ async function openChat(id: string, pinned?: boolean, options: { related?: boole
     if (token !== generation) return;
     if (connected && !historyError) inform();
     renderChat(!visit);
+    if (options.createdChild) await locateCreation(id, options.createdChild, token);
+    if (token !== generation) return;
     if (pending) void checkReceipt(token).catch(error => { if (token === generation) inform(errorText(error)); });
     if (stopOperation) void checkStopReceipt(token);
     if (interaction) void checkInteractionReceipt(token);
@@ -1183,12 +1218,12 @@ function renderChat(forceBottom = false): void {
   element('chat-error-text').textContent = [historyError, streamError].filter(Boolean).join(' ');
   renderConnection();
   olderButton.hidden = !selected.hasMore;
-  olderButton.disabled = !connected || olderLoading || syncing;
+  olderButton.disabled = !connected || olderLoading || syncing || locatingSource;
   olderButton.setAttribute('aria-busy', String(olderLoading));
   element('older-spinner').hidden = !olderLoading;
   element('older-label').textContent = olderLoading ? '正在读取更早的消息…' : '读取更早的消息';
   const hasMessages = selected.turns.some(turn => turn.messages.length > 0);
-  const loadingText = opening && !hasMessages ? '正在读取对话…' : syncing && connected ? '正在同步最新消息…' : '';
+  const loadingText = locatingSource ? '正在定位来源轮次…' : opening && !hasMessages ? '正在读取对话…' : syncing && connected ? '正在同步最新消息…' : '';
   element('history-status').hidden = !loadingText || Boolean(historyError) || Boolean(streamError);
   element('history-status-text').textContent = loadingText;
   element('empty-history').hidden = hasMessages || opening || syncing || !historyLoaded || Boolean(historyError);
@@ -2210,7 +2245,7 @@ element('more-threads').addEventListener('click', async () => {
   finally { if (token === generation) { moreLoading = false; button.disabled = !connected; } }
 });
 async function loadOlderHistory(): Promise<void> {
-  if (!client || !selected?.nextCursor || olderLoading || !historyLoaded) return;
+  if (!client || !selected?.nextCursor || olderLoading || locatingSource || !historyLoaded) return;
   const token = generation;
   const oldHeight = scroll.scrollHeight;
   const oldTop = scroll.scrollTop;
