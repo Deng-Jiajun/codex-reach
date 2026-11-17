@@ -21,8 +21,8 @@ export function threadTitle(thread: Pick<Thread, 'id' | 'title'>): string {
   return characters.length > 60 ? characters.slice(0, 60).join('') + '…' : title;
 }
 
-export function groupThreads(threads: Thread[], projects: Project[], grouping: Grouping): { title: string; threads: Thread[] }[] {
-  const groups = new Map<string, { title: string; rank: string; threads: Thread[] }>();
+export function groupThreads(threads: Thread[], projects: Project[], grouping: Grouping): { key: string; title: string; threads: Thread[] }[] {
+  const groups = new Map<string, { key: string; title: string; rank: string; threads: Thread[] }>();
   for (const thread of threads) {
     const project = threadProject(thread, projects);
     const projectPath = project ? directoryKey(project.path) : '';
@@ -45,7 +45,7 @@ export function groupThreads(threads: Thread[], projects: Project[], grouping: G
     }
     const key = thread.pinned ? 'pinned' : grouping === 'project' ? `project:${projectPath}` : title;
     let group = groups.get(key);
-    if (!group) { group = { title, rank, threads: [] }; groups.set(key, group); }
+    if (!group) { group = { key, title, rank, threads: [] }; groups.set(key, group); }
     group.threads.push(thread);
   }
   if (grouping === 'project') {
@@ -58,5 +58,5 @@ export function groupThreads(threads: Thread[], projects: Project[], grouping: G
     }
   }
   return [...groups.values()].sort((left, right) => left.rank.localeCompare(right.rank, 'zh-CN'))
-    .map(group => ({ title: group.title, threads: group.threads.sort((left, right) => right.updatedAt - left.updatedAt) }));
+    .map(group => ({ key: group.key, title: group.title, threads: group.threads.sort((left, right) => right.updatedAt - left.updatedAt) }));
 }

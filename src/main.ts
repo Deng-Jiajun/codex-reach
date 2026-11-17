@@ -745,10 +745,32 @@ function renderInbox(): void {
   const fragment = document.createDocumentFragment();
   element('list-scope').classList.toggle('sr-only', !query && !projectId);
   element('list-scope').textContent = `已加载 ${threads.length} 条${query || projectId ? ` · 匹配 ${visible.length} 条` : ''}`;
+  const collapseKey = storageKey('collapsed-groups', `${archivedList}:${grouping}`);
+  const collapsed = new Set(readStored<string[]>(collapseKey) ?? []);
   for (const group of groupThreads(visible, projects, grouping)) {
     const heading = document.createElement('h2');
-    heading.className = 'thread-group-title'; heading.textContent = group.title;
-    fragment.append(heading);
+    heading.className = 'thread-group-title';
+    const toggle = document.createElement('button');
+    toggle.type = 'button'; toggle.className = 'thread-group-toggle';
+    const content = document.createElement('div');
+    content.id = `thread-group-${fragment.childElementCount}`;
+    content.hidden = !query && collapsed.has(group.key);
+    const updateToggle = () => {
+      toggle.textContent = `${content.hidden ? '▸' : '▾'} ${group.title}`;
+      toggle.setAttribute('aria-expanded', String(!content.hidden));
+    };
+    toggle.setAttribute('aria-controls', content.id);
+    updateToggle();
+    toggle.addEventListener('click', () => {
+      content.hidden = !content.hidden;
+      updateToggle();
+      if (!query) {
+        if (content.hidden) collapsed.add(group.key); else collapsed.delete(group.key);
+        localStorage.setItem(collapseKey, JSON.stringify([...collapsed]));
+      }
+    });
+    heading.append(toggle);
+    fragment.append(heading, content);
     for (const thread of group.threads) {
     const row = document.createElement('div');
     row.className = 'thread-entry';
@@ -780,7 +802,7 @@ function renderInbox(): void {
     button.addEventListener('contextmenu', event => { event.preventDefault(); cancel(); if (!held) openThreadMenu(thread); held = true; });
     button.addEventListener('click', () => { if (!held) void openChat(thread.id); held = false; });
     row.append(button);
-    fragment.append(row);
+    content.append(row);
     }
   }
   if (!visible.length) {
