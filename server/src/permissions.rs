@@ -90,7 +90,12 @@ impl Mode {
 pub fn current(settings: &Value) -> &'static str {
     let profile = settings["activePermissionProfile"]["id"]
         .as_str()
-        .or_else(|| settings["permissions"].as_str());
+        .or_else(|| settings["permissions"].as_str())
+        .or_else(|| match settings["sandboxPolicy"]["type"].as_str()? {
+            "dangerFullAccess" => Some(":danger-full-access"),
+            "workspaceWrite" => Some(":workspace"),
+            _ => None,
+        });
     let reviewer = settings["approvalsReviewer"].as_str();
     MODES
         .iter()

@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify';
-import { marked, Renderer } from 'marked';
+import { Renderer } from 'marked';
+import { markdown } from './markdown';
 import type { ResponseAnnotation } from './types';
 import type { ReachClient } from './api';
 import { loadImage, openPreview } from './files';
@@ -73,6 +74,7 @@ export async function copyText(text: string, button: HTMLButtonElement): Promise
     setIcon(button, 'check', '已复制');
   } catch { setIcon(button, 'close', '复制失败，请重试'); }
   const status = document.createElement('span');
+  status.dataset.selectionIgnore = '';
   status.className = 'sr-only'; status.setAttribute('role', 'status');
   status.textContent = button.getAttribute('aria-label');
   button.after(status);
@@ -95,7 +97,7 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
     pre.append(code);
     return pre.outerHTML;
   };
-  template.innerHTML = marked.parse(body, { async: false, renderer });
+  template.innerHTML = markdown.parse(body, { async: false, renderer });
   // The desktop renderer concatenates block elements without HTML formatting whitespace.
   const blockSpaces = document.createTreeWalker(template.content, NodeFilter.SHOW_TEXT);
   const formatting: Text[] = [];
@@ -168,7 +170,7 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
   while (walker.nextNode()) texts.push(walker.currentNode as Text);
   for (const text of texts) {
     if (text.parentElement?.closest('code, pre, a, button')) continue;
-    const pattern = /:codex-annotation\{index="([1-9]\d*)"\}/g;
+    const pattern = /:codex-annotation\{index="([1-9]\d*)"(?:\s+id="[^"{}]+")?\}/g;
     const fragment = document.createDocumentFragment();
     let end = 0;
     for (const match of text.data.matchAll(pattern)) {
@@ -188,15 +190,28 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
     if (end) { fragment.append(text.data.slice(end)); text.replaceWith(fragment); }
   }
   if (navigation) renderThreadMarkers(template.content, navigation);
-  for (const pre of template.content.querySelectorAll('pre')) {
+  for (const code of template.content.querySelectorAll('pre > code.language-diff, pre > code.language-patch')) {
+    const lines = (code.textContent ?? '').split('\n');
+    code.replaceChildren(...lines.map((line, index) => {
+      const span = document.createElement('span');
+      span.className = line.startsWith('@@') || line.startsWith('diff ') || line.startsWith('--- ') || line.startsWith('+++ ')
+        ? 'diff-header' : line.startsWith('+') ? 'diff-added' : line.startsWith('-') ? 'diff-removed' : 'diff-context';
+      span.textContent = line + (index < lines.length - 1 ? '\n' : '');
+      return span;
+    }));
+  }
+  for (const pre of template.content.querySelectorAll('pre, blockquote')) {
     const copy = document.createElement('button');
     copy.type = 'button';
     copy.className = 'quiet copy-code';
     copy.dataset.selectionIgnore = '';
-    setIcon(copy, 'copy', '复制代码');
-    const code = pre.textContent ?? '';
+    setIcon(copy, 'copy', pre.tagName === 'PRE' ? '复制代码' : '复制引用');
+    const code = sourceText(pre, false);
     copy.addEventListener('click', () => void copyText(code, copy));
-    pre.after(copy);
+    const wrapper = document.createElement('div');
+    wrapper.className = 'copy-block';
+    pre.replaceWith(wrapper);
+    wrapper.append(pre, copy);
   }
   container.replaceChildren(template.content);
 }

@@ -137,6 +137,12 @@
                 <button id="create-chat-button" class="send" type="submit" aria-label="创建并发送"></button>
               </div>
             </div>
+            <details id="empty-chat-details" hidden>
+              <summary>先创建对话</summary>
+              <label>首轮权限<select id="empty-chat-permission"><option value="ask">请求批准 · Ask</option><option value="auto">自动审批 · Approve for me</option><option value="full">完全访问 · Full access</option></select></label>
+              <p class="field-note" id="empty-chat-note"></p>
+              <button type="button" class="quiet" id="create-empty-chat">仅创建，稍后发送</button>
+            </details>
           </fieldset>
           <p id="new-chat-status" class="field-note" role="status" hidden></p>
           <p id="new-chat-error" class="form-error" role="alert" hidden></p>

@@ -5,6 +5,12 @@ use crate::files::FileAttachment;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
 pub struct TurnOptions {
+    #[serde(
+        default,
+        rename = "expectedPermission",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expected_permission: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -841,6 +847,7 @@ pub fn stream_view(state: &Value) -> Value {
             "approvalsReviewer": state["latestThreadSettings"]["approvalsReviewer"],
             "permissions": state["latestThreadSettings"]["permissions"],
             "activePermissionProfile": state["latestThreadSettings"]["activePermissionProfile"],
+            "sandboxPolicy": state["latestThreadSettings"]["sandboxPolicy"],
         },
         "title": state["title"],
         "waiting": !requests.is_empty(),
@@ -955,6 +962,7 @@ mod tests {
         assert_eq!(selected["thinking"], "high");
         let permissions = json!({
             "activePermissionProfile":{"id":":workspace","extends":null},
+            "sandboxPolicy":{"type":"workspaceWrite"},
             "approvalPolicy":"on-request",
             "approvalsReviewer":"auto_review",
             "permissions":":workspace"

@@ -1,6 +1,7 @@
 mod app_server;
 mod context;
 mod desktop;
+mod empty_thread;
 mod events;
 mod files;
 mod model;
@@ -55,6 +56,7 @@ struct AppState {
     events: events::Events,
     send_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     upload_directory: PathBuf,
+    workspace_directory: PathBuf,
     context_directory: PathBuf,
     uploads: Arc<uploads::Uploads>,
     reader: Arc<reader::Reader>,
@@ -142,7 +144,13 @@ impl AppState {
                     }
                 }
                 if let Some(owner) = client.follow(chat_id).await? {
-                    client.live(chat_id, None).await?;
+                    let view = client.live(chat_id, None).await?;
+                    if let Some(expected) = &options.expected_permission {
+                        ensure!(
+                            permissions::current(&view["permissionSettings"]) == expected,
+                            "尚未发送：桌面权限与手机确认的首轮权限不同，请打开「发送参数」确认并保存"
+                        );
+                    }
                     let result = client
                         .send(
                             chat_id,
@@ -166,6 +174,10 @@ impl AppState {
                 break;
             }
         }
+        ensure!(
+            options.expected_permission.is_none(),
+            "尚未发送：无法确认桌面首轮权限，请加载对话后重试"
+        );
         ensure!(
             !next_turn_only && options.skills.is_empty() && options.attachments.is_empty(),
             "桌面尚未载入此对话，请稍后查询投递结果"
@@ -250,7 +262,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiEr
         .call("config/read", json!({"includeLayers":false}))
         .await?;
     Ok(Json(
-        json!({"serverId":state.config.server_id,"version":env!("CARGO_PKG_VERSION"),"desktopConnected":true,"desktopLocale":configuration["config"]["desktop"]["localeOverride"]}),
+        json!({"serverId":state.config.server_id,"version":env!("CARGO_PKG_VERSION"),"desktopConnected":true,"emptyThreadCreation":true,"desktopLocale":configuration["config"]["desktop"]["localeOverride"]}),
     ))
 }
 
@@ -1137,6 +1149,7 @@ async fn main() -> Result<()> {
         events: events::Events::open(&directory.join("events.db"))?,
         send_locks: Mutex::new(HashMap::new()),
         upload_directory: std::path::absolute(directory.join("uploads"))?,
+        workspace_directory: std::path::absolute(directory.join("workspaces"))?,
         context_directory: std::path::absolute(directory.join("contexts"))?,
         uploads: Arc::new(uploads::Uploads::open(&std::path::absolute(
             directory.join("uploads"),
@@ -1176,6 +1189,7 @@ async fn main() -> Result<()> {
             post(upload_file).layer(DefaultBodyLimit::max(28_010_000)),
         )
         .route("/threads", get(threads).post(create_thread))
+        .route("/threads/empty", post(empty_thread::create))
         .route("/threads/{id}/history", get(history))
         .route("/threads/{id}/reference", get(thread_reference))
         .route("/threads/{id}/settings", get(thread_settings))

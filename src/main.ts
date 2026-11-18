@@ -114,7 +114,7 @@ let interaction: Interaction | null = null;
 let questionReplies: QuestionReply[] = [];
 let questionDrafts: QuestionReply[] = [];
 type NewChatDraft = { projectId?: string; prompt: string } & TurnOptions;
-type Creation = NewChatDraft & { requestId: string; status?: string; error?: string };
+type Creation = NewChatDraft & { requestId: string; status?: string; error?: string; emptyPermission?: string };
 type StopOperation = { requestId: string; expectedTurnId: string; status?: string; error?: string };
 let creation: Creation | null = null;
 let creationPolling: { key: string; client: ReachClient } | null = null;
@@ -385,10 +385,11 @@ async function connect(): Promise<void> {
     }
     const candidate: Connection = { url: url.origin, key: keyInput.value.trim(), serverId: '' };
     const nextClient = new ReachClient(candidate);
-    const status = await nextClient.request<{ serverId: string; desktopLocale?: string | null }>('/status');
+    const status = await nextClient.request<Pick<Connection, 'serverId' | 'desktopLocale' | 'emptyThreadCreation'>>('/status');
     if (attempt !== connectionAttempt) return;
     candidate.serverId = status.serverId;
     candidate.desktopLocale = status.desktopLocale;
+    candidate.emptyThreadCreation = status.emptyThreadCreation;
     const sameServer = candidate.serverId === connection?.serverId;
     const returnToChat = settingsReturnView === 'chat' && sameServer;
     stopUpdates();
@@ -441,6 +442,7 @@ async function loadInbox(token: number): Promise<void> {
   ]);
   if (token !== generation) return;
   projects = projectResult.projects;
+  forgetEmptyChats(threadResult.threads.map(thread => thread.id));
   threads = threadResult.threads.map(thread => {
     thread.pinned = Boolean(thread.pinned);
     const current = threads.find(item => item.id === thread.id);
@@ -592,6 +594,7 @@ function openThreadMenu(thread: Thread): void {
 
 async function invalidateChats(ids: string[]): Promise<void> {
   if (!connection) return;
+  forgetEmptyChats(ids);
   if (selected && ids.includes(selected.id)) {
     stopUpdates(); selected = null;
     renderedMessages.clear(); element('messages').replaceChildren();
@@ -726,6 +729,16 @@ function renderTaskState(node: HTMLElement, label: string): void {
   node.title = label;
 }
 
+function emptyChats(): Thread[] {
+  return readStored<Thread[]>(storageKey('empty-chats')) ?? [];
+}
+
+function forgetEmptyChats(ids: string[]): void {
+  const saved = emptyChats();
+  const remaining = saved.filter(thread => !ids.includes(thread.id));
+  if (remaining.length !== saved.length) localStorage.setItem(storageKey('empty-chats'), JSON.stringify(remaining));
+}
+
 function renderInbox(): void {
   const query = searchInput.value.trim().toLocaleLowerCase();
   const projectId = projectFilter.value;
@@ -735,7 +748,8 @@ function renderInbox(): void {
   element('project-filter-label').textContent = title;
   element('project-filter-button').setAttribute('aria-label', `筛选项目，当前：${title}`);
   element('project-filter-button').title = selectedProject?.path ? `${title}\n${selectedProject.path}` : title;
-  const visible = threads.filter(thread => {
+  const inbox = archivedList ? threads : [...emptyChats().filter(draft => !threads.some(thread => thread.id === draft.id)), ...threads];
+  const visible = inbox.filter(thread => {
     const project = threadProject(thread, projects);
     const matchesProject = !projectId || (projectId === '__none__'
       ? !project : Boolean(project && selectedProject && directoryKey(project.path) === directoryKey(selectedProject.path)));
@@ -744,7 +758,7 @@ function renderInbox(): void {
   });
   const fragment = document.createDocumentFragment();
   element('list-scope').classList.toggle('sr-only', !query && !projectId);
-  element('list-scope').textContent = `已加载 ${threads.length} 条${query || projectId ? ` · 匹配 ${visible.length} 条` : ''}`;
+  element('list-scope').textContent = `已加载 ${inbox.length} 条${query || projectId ? ` · 匹配 ${visible.length} 条` : ''}`;
   const collapseKey = storageKey('collapsed-groups', `${archivedList}:${grouping}`);
   const collapsed = new Set(readStored<string[]>(collapseKey) ?? []);
   for (const group of groupThreads(visible, projects, grouping)) {
@@ -1436,6 +1450,10 @@ async function checkReceipt(token: number): Promise<void> {
   }
   if (token !== generation || pending?.requestId !== request.requestId) return;
   if (receipt.status === 'accepted') {
+    if (request.options?.expectedPermission) {
+      delete turnOptions.expectedPermission;
+      localStorage.setItem(storageKey('options', chatId), JSON.stringify(turnOptions));
+    }
     if (messageInput.value === request.prompt) {
       messageInput.value = '';
       resizeInput();
@@ -1583,7 +1601,15 @@ function saveNewChatDraft(): void {
   if (!creation && connection) localStorage.setItem(storageKey('new-chat-draft'), JSON.stringify(newChatDraft()));
   const project = projects.find(item => item.id === element<HTMLSelectElement>('new-chat-project').value);
   element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
+  renderEmptyChatNote();
   renderNewContext();
+}
+
+function renderEmptyChatNote(): void {
+  const project = element<HTMLSelectElement>('new-chat-project').value;
+  element('empty-chat-note').textContent = project
+    ? '首条消息和附件将保存在新对话草稿中。'
+    : 'Reach 会分配独立工作目录，并将首条消息和附件保存在新对话草稿中。';
 }
 
 function renderCreation(): void {
@@ -1594,6 +1620,8 @@ function renderCreation(): void {
   newThinking.disabled = awaitingFirstCatalog || !newModel.value;
   const button = element<HTMLButtonElement>('create-chat-button');
   button.disabled = awaitingFirstCatalog || Boolean(creation) || Boolean(client && uploadCount(client, storageKey('attachments', '__new__')));
+  element<HTMLButtonElement>('create-empty-chat').disabled = button.disabled;
+  element('empty-chat-details').hidden = !connection?.emptyThreadCreation;
   setIcon(button, 'send', creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送');
   const catalogStatus = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   element('new-chat-status').textContent = newFormLoading ? catalogStatus
@@ -1623,6 +1651,9 @@ async function openNewChat(): Promise<void> {
     projectSelect.setCustomValidity('请重新选择可用项目');
   }
   projectSelect.value = draft.projectId ?? '';
+  renderEmptyChatNote();
+  element<HTMLDetailsElement>('empty-chat-details').open = Boolean(creation?.emptyPermission);
+  element<HTMLSelectElement>('empty-chat-permission').value = creation?.emptyPermission ?? localStorage.getItem(storageKey('empty-chat-permission')) ?? 'ask';
   element<HTMLTextAreaElement>('new-chat-prompt').value = draft.prompt;
   newSkills = draft.skills ?? []; newThreads = draft.threadRefs ?? [];
   renderNewContext();
@@ -1649,20 +1680,33 @@ async function openNewChat(): Promise<void> {
   if (creation) void pollCreation();
 }
 
-async function createChat(): Promise<void> {
+async function createChat(empty = false): Promise<void> {
   if (!client || !connection || creation || (newFormLoading && !modelChoices.length)) return;
   const draft = newChatDraft();
-  if ((!draft.prompt.trim() && !draft.attachments?.length && !draft.skills?.length && !draft.threadRefs?.length) || (client && uploadCount(client, storageKey('attachments', '__new__')))) return;
+  if ((!empty && !draft.prompt.trim() && !draft.attachments?.length && !draft.skills?.length && !draft.threadRefs?.length) || uploadCount(client, storageKey('attachments', '__new__'))) return;
   const serverId = connection.serverId;
-  const request: Creation = { ...draft, requestId: crypto.randomUUID(), status: 'sending' };
+  const emptyPermission = empty ? element<HTMLSelectElement>('empty-chat-permission').value : undefined;
+  const request: Creation = { ...draft, requestId: crypto.randomUUID(), status: 'sending', emptyPermission };
   creation = request;
   newFormError = '';
   localStorage.setItem(storageKey('creation'), JSON.stringify(request));
   renderCreation();
   try {
-    await client.request<Receipt>('/threads', 'POST', { ...draft, requestId: request.requestId });
+    if (empty) {
+      await client.request<Receipt>('/threads/empty', 'POST', { projectId: draft.projectId, model: draft.model, thinking: draft.thinking, permissionMode: emptyPermission, requestId: request.requestId });
+    } else {
+      await client.request<Receipt>('/threads', 'POST', { ...draft, requestId: request.requestId });
+    }
   } catch (error) {
     if (connection?.serverId !== serverId || creation?.requestId !== request.requestId) return;
+    if (empty && error instanceof ReachError && [400, 404, 422].includes(error.status)) {
+      creation = null;
+      localStorage.removeItem(storageKey('creation'));
+      newFormError = error.status === 404 ? '请更新电脑 Reach 服务后再创建空对话。' : errorText(error);
+      saveNewChatDraft();
+      renderCreation();
+      return;
+    }
     creation.error = `创建结果待确认。${errorText(error)}`;
     localStorage.setItem(storageKey('creation'), JSON.stringify(creation));
     renderCreation();
@@ -1703,6 +1747,18 @@ async function pollCreation(): Promise<void> {
       if (client !== actionClient || connection?.serverId !== serverId || creation?.requestId !== requestId) return;
       if (receipt.status === 'accepted' && receipt.result?.threadId) {
         const threadId = receipt.result.threadId;
+        if (creation.emptyPermission) {
+          const draftThread: Thread = { id: threadId, projectId: creation.projectId ?? null,
+            cwd: receipt.result.cwd ?? '', title: creation.prompt.trim().slice(0, 80) || '新对话 · 待发送',
+            updatedAt: Date.now() / 1000, status: 'idle', pinned: false };
+          localStorage.setItem(storageKey('empty-chats'), JSON.stringify([draftThread, ...emptyChats().filter(thread => thread.id !== threadId)]));
+          localStorage.setItem(storageKey('empty-chat-permission'), creation.emptyPermission);
+          localStorage.setItem(storageKey('draft', threadId), creation.prompt);
+          localStorage.setItem(storageKey('skills', threadId), JSON.stringify(creation.skills ?? []));
+          localStorage.setItem(storageKey('thread-refs', threadId), JSON.stringify(creation.threadRefs ?? []));
+          localStorage.setItem(storageKey('attachments', threadId), JSON.stringify(creation.attachments ?? []));
+          localStorage.setItem(storageKey('options', threadId), JSON.stringify({ model: creation.model, thinking: creation.thinking, expectedPermission: creation.emptyPermission }));
+        }
         creation = null;
         localStorage.removeItem(storageKey('creation'));
         localStorage.removeItem(storageKey('new-chat-draft'));
@@ -1715,6 +1771,7 @@ async function pollCreation(): Promise<void> {
           inform('新会话已创建，可在会话列表中查看。');
           if (currentView === 'inbox') await refreshInbox();
         }
+        if (client === actionClient && receipt.result.warning) inform(receipt.result.warning);
         return;
       }
       creation.status = receipt.status;
@@ -2034,6 +2091,9 @@ async function submitEdit(): Promise<void> {
 element('connection-form').addEventListener('submit', event => { event.preventDefault(); void connect(); });
 element('new-chat-button').addEventListener('click', () => void openNewChat());
 element('new-chat-form').addEventListener('submit', event => { event.preventDefault(); void createChat(); });
+element('create-empty-chat').addEventListener('click', () => {
+  if (element<HTMLSelectElement>('new-chat-project').reportValidity()) void createChat(true);
+});
 element('new-chat-project').addEventListener('change', () => {
   element<HTMLSelectElement>('new-chat-project').setCustomValidity('');
   saveNewChatDraft();
@@ -2174,6 +2234,7 @@ element('options-form').addEventListener('submit', async event => {
     catch (error) { if (current()) showFormError('options-error', errorText(error)); return; }
     finally { if (current()) button.disabled = false; }
   }
+  if (turnOptions.expectedPermission) options.expectedPermission = mode ?? turnOptions.expectedPermission;
   turnOptions = options;
   localStorage.setItem(storageKey('options', selected.id), JSON.stringify(turnOptions));
   optionsDialog.close();
@@ -2260,6 +2321,7 @@ element('more-threads').addEventListener('click', async () => {
     const page = await client.request<{ threads: Thread[]; nextCursor: string | null }>(`/threads?archived=${archivedList}&cursor=${encodeURIComponent(nextThreads)}`);
     if (token !== generation) return;
     const existing = new Set(threads.map(thread => thread.id));
+    forgetEmptyChats(page.threads.map(thread => thread.id));
     threads.push(...page.threads.filter(thread => !existing.has(thread.id)).map(thread => ({ ...thread, pinned: Boolean(thread.pinned) })));
     nextThreads = page.nextCursor;
     renderInbox();
@@ -2400,9 +2462,11 @@ async function refreshDesktopLocale(): Promise<void> {
   const current = client;
   if (!current || !connection) return;
   try {
-    const status = await current.request<{ serverId: string; desktopLocale?: string | null }>('/status');
+    const status = await current.request<Pick<Connection, 'serverId' | 'desktopLocale' | 'emptyThreadCreation'>>('/status');
     if (client !== current || status.serverId !== connection.serverId) return;
     connection.desktopLocale = status.desktopLocale;
+    connection.emptyThreadCreation = status.emptyThreadCreation;
+    if (newDialog.open) renderCreation();
     localStorage.setItem('codex-reach-connection', JSON.stringify(connection));
     if (selected) renderChat();
   } catch { /* Cached reading remains available while connection recovery runs. */ }

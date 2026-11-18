@@ -16,6 +16,29 @@ pub struct AppServerClient {
 }
 
 impl AppServerClient {
+    pub async fn start_empty(&self, params: Value) -> Result<String> {
+        // Release the creation process so the desktop can own the first turn.
+        let mut server = AppServer::start().await?;
+        let result = timeout(Duration::from_secs(30), server.call("thread/start", params))
+            .await
+            .context("创建空对话超时")??;
+        let id = result["thread"]["id"]
+            .as_str()
+            .context("创建结果缺少会话标识")?
+            .to_owned();
+        timeout(
+            Duration::from_secs(15),
+            server.call("thread/name/set", json!({"threadId":id,"name":"新对话"})),
+        )
+        .await
+        .context("保存空对话超时")??;
+        drop(server.input);
+        let _ = timeout(Duration::from_secs(5), server._child.wait()).await;
+        self.call("thread/read", json!({"threadId":id,"includeTurns":false}))
+            .await?;
+        Ok(id)
+    }
+
     pub async fn reference(&self, thread_id: &str, include_origin: bool) -> Result<Value> {
         let metadata = self
             .call(
