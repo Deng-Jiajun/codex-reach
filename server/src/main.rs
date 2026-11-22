@@ -1,7 +1,7 @@
 mod app_server;
 mod context;
+mod create_thread;
 mod desktop;
-mod empty_thread;
 mod events;
 mod files;
 mod model;
@@ -399,80 +399,6 @@ async fn open_thread(
         .call("navigate_to_codex_page", json!({"threadId":id}))
         .await?;
     Ok(Json(json!({"opened":true})))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateRequest {
-    request_id: String,
-    prompt: String,
-    project_id: Option<String>,
-    #[serde(flatten)]
-    options: model::TurnOptions,
-}
-
-async fn create_thread(
-    State(state): State<Arc<AppState>>,
-    Json(input): Json<CreateRequest>,
-) -> Result<(StatusCode, Json<Receipt>), ApiError> {
-    if (input.prompt.trim().is_empty()
-        && input.options.attachments.is_empty()
-        && input.options.thread_refs.is_empty()
-        && input.options.skills.is_empty())
-        || Uuid::parse_str(&input.request_id).is_err()
-    {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "首条消息和有效的请求标识为必填项".to_owned(),
-        ));
-    }
-    let mut options = serde_json::to_value(&input.options).map_err(anyhow::Error::from)?;
-    options["projectId"] = json!(input.project_id);
-    let (receipt, fresh) = state
-        .outbox
-        .reserve(&input.request_id, "create", "", &input.prompt, &options)
-        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
-    if fresh {
-        tokio::spawn(async move {
-            let result = async {
-                let cwd = match &input.project_id {
-                    Some(id) => Some(context::project_path(&state, id).await?),
-                    None => None,
-                };
-                context::validate_skills(&state, cwd.as_deref(), &input.options).await?;
-                let resolved = context::resolve(&state, &input.request_id, &input.options).await?;
-                let target = if let Some(project_id) = input.project_id {
-                    json!({"type":"project","projectId":project_id,"environment":{"type":"local"}})
-                } else {
-                    json!({"type":"projectless"})
-                };
-                let mut arguments = json!({});
-                if let Some(model) = &input.options.model {
-                    arguments["model"] = json!(model);
-                }
-                if let Some(thinking) = &input.options.thinking {
-                    arguments["thinking"] = json!(thinking);
-                }
-                arguments["prompt"] = json!(context::first_prompt(
-                    &input.prompt,
-                    &input.request_id,
-                    &resolved
-                ));
-                arguments["target"] = target;
-                let result = state.tools.call("create_thread", arguments).await?;
-                ensure!(
-                    result["threadId"].as_str().is_some_and(|id| !id.is_empty()),
-                    "桌面尚未返回新会话标识，请先核对会话列表"
-                );
-                Ok(result)
-            }
-            .await;
-            if state.outbox.finish(&input.request_id, result).is_err() {
-                eprintln!("无法保存新建会话的结果，请检查本地操作数据库");
-            }
-        });
-    }
-    Ok((StatusCode::ACCEPTED, Json(receipt)))
 }
 
 #[derive(Deserialize)]
@@ -937,10 +863,7 @@ async fn send(
     Path(id): Path<String>,
     Json(input): Json<SendRequest>,
 ) -> Result<(StatusCode, Json<Receipt>), ApiError> {
-    if (input.prompt.trim().is_empty()
-        && input.options.attachments.is_empty()
-        && input.options.skills.is_empty()
-        && input.options.thread_refs.is_empty())
+    if validate_message(&input.prompt, &input.options).is_err()
         || Uuid::parse_str(&input.request_id).is_err()
     {
         return Err(ApiError(
@@ -948,6 +871,17 @@ async fn send(
             "请填写消息或选择附件，并提供有效的发送标识".to_owned(),
         ));
     }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(submit_message(state, id, input)?),
+    ))
+}
+
+fn submit_message(
+    state: Arc<AppState>,
+    id: String,
+    input: SendRequest,
+) -> Result<Receipt, ApiError> {
     let (receipt, fresh) = state
         .outbox
         .reserve(
@@ -968,7 +902,7 @@ async fn send(
             }
         });
     }
-    Ok((StatusCode::ACCEPTED, Json(receipt)))
+    Ok(receipt)
 }
 
 async fn receipt(
@@ -1114,8 +1048,7 @@ async fn main() -> Result<()> {
         .route("/uploads/{id}", get(upload_status))
         .route("/uploads/{id}/chunk", post(upload_chunk))
         .route("/uploads/{id}/finish", post(finish_upload))
-        .route("/threads", get(threads).post(create_thread))
-        .route("/threads/empty", post(empty_thread::create))
+        .route("/threads", get(threads).post(create_thread::create))
         .route("/threads/{id}/history", get(history))
         .route("/threads/{id}/reference", get(thread_reference))
         .route("/threads/{id}/settings", get(thread_settings))

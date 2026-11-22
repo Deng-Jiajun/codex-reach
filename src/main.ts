@@ -113,7 +113,7 @@ type Interaction = { requestId: string; kind: 'respond' | 'edit'; approvalReques
 let interaction: Interaction | null = null;
 let questionReplies: QuestionReply[] = [];
 let questionDrafts: QuestionReply[] = [];
-type NewChatDraft = { projectId?: string; prompt: string } & TurnOptions;
+type NewChatDraft = { permissionMode?: string; projectId?: string; prompt: string } & TurnOptions;
 type Creation = NewChatDraft & { requestId: string; status?: string; error?: string; emptyPermission?: string };
 type StopOperation = { requestId: string; expectedTurnId: string; status?: string; error?: string };
 let creation: Creation | null = null;
@@ -1624,6 +1624,7 @@ function showFormError(id: string, text = ''): void {
 
 function newChatDraft(): NewChatDraft {
   return {
+    permissionMode: element<HTMLSelectElement>('new-chat-permission').value,
     projectId: element<HTMLSelectElement>('new-chat-project').value || undefined,
     prompt: element<HTMLTextAreaElement>('new-chat-prompt').value,
     ...selectedParameters(newModel, newThinking),
@@ -1635,16 +1636,8 @@ function newChatDraft(): NewChatDraft {
 function saveNewChatDraft(): void {
   if (!creation && connection) localStorage.setItem(storageKey('new-chat-draft'), JSON.stringify(newChatDraft()));
   const project = projects.find(item => item.id === element<HTMLSelectElement>('new-chat-project').value);
-  element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
-  renderEmptyChatNote();
+  element('new-chat-path').textContent = project?.path ?? '由 Reach 创建独立目录';
   renderNewContext();
-}
-
-function renderEmptyChatNote(): void {
-  const project = element<HTMLSelectElement>('new-chat-project').value;
-  element('empty-chat-note').textContent = project
-    ? '首条消息和附件将保存在新对话草稿中。'
-    : 'Reach 会分配独立工作目录，并将首条消息和附件保存在新对话草稿中。';
 }
 
 function renderCreation(): void {
@@ -1685,9 +1678,7 @@ async function openNewChat(): Promise<void> {
     projectSelect.setCustomValidity('请重新选择可用项目');
   }
   projectSelect.value = draft.projectId ?? '';
-  renderEmptyChatNote();
-  element<HTMLDetailsElement>('empty-chat-details').open = Boolean(creation?.emptyPermission);
-  element<HTMLSelectElement>('empty-chat-permission').value = creation?.emptyPermission ?? localStorage.getItem(storageKey('empty-chat-permission')) ?? 'ask';
+  element<HTMLSelectElement>('new-chat-permission').value = draft.permissionMode ?? creation?.emptyPermission ?? localStorage.getItem(storageKey('empty-chat-permission')) ?? 'ask';
   element<HTMLTextAreaElement>('new-chat-prompt').value = draft.prompt;
   newSkills = draft.skills ?? []; newThreads = draft.threadRefs ?? [];
   renderNewContext();
@@ -1696,7 +1687,7 @@ async function openNewChat(): Promise<void> {
   newFormError = '';
   populateParameters(newModel, newThinking, modelChoices, draft, '使用默认设置');
   const project = projects.find(item => item.id === draft.projectId);
-  element('new-chat-path').textContent = project?.path ?? '由 Codex 创建独立目录';
+  element('new-chat-path').textContent = project?.path ?? '由 Reach 创建独立目录';
   renderCreation();
   showDialog(newDialog);
   resizeNewInput();
@@ -1719,21 +1710,17 @@ async function createChat(empty = false): Promise<void> {
   const draft = newChatDraft();
   if ((!empty && !draft.prompt.trim() && !draft.attachments?.length && !draft.skills?.length && !draft.threadRefs?.length) || uploadCount(client, storageKey('attachments', '__new__'))) return;
   const serverId = connection.serverId;
-  const emptyPermission = empty ? element<HTMLSelectElement>('empty-chat-permission').value : undefined;
-  const request: Creation = { ...draft, requestId: crypto.randomUUID(), status: 'sending', emptyPermission };
+  const request: Creation = { ...draft, requestId: crypto.randomUUID(), status: 'sending' };
   creation = request;
   newFormError = '';
   localStorage.setItem(storageKey('creation'), JSON.stringify(request));
   renderCreation();
   try {
-    if (empty) {
-      await client.request<Receipt>('/threads/empty', 'POST', { projectId: draft.projectId, model: draft.model, thinking: draft.thinking, permissionMode: emptyPermission, requestId: request.requestId });
-    } else {
-      await client.request<Receipt>('/threads', 'POST', { ...draft, requestId: request.requestId });
-    }
+    const body = empty ? { projectId: draft.projectId, model: draft.model, thinking: draft.thinking } : draft;
+    await client.request<Receipt>('/threads', 'POST', { ...body, permissionMode: draft.permissionMode, requestId: request.requestId });
   } catch (error) {
     if (connection?.serverId !== serverId || creation?.requestId !== request.requestId) return;
-    if (versionMismatch(error) || (empty && error instanceof ReachError && [400, 404, 422].includes(error.status))) {
+    if (versionMismatch(error) || (error instanceof ReachError && [400, 422].includes(error.status))) {
       creation = null;
       localStorage.removeItem(storageKey('creation'));
       newFormError = errorText(error);
@@ -1781,17 +1768,25 @@ async function pollCreation(): Promise<void> {
       if (client !== actionClient || connection?.serverId !== serverId || creation?.requestId !== requestId) return;
       if (receipt.status === 'accepted' && receipt.result?.threadId) {
         const threadId = receipt.result.threadId;
-        if (creation.emptyPermission) {
+        const permission = creation.permissionMode ?? creation.emptyPermission;
+        if (permission) {
           const draftThread: Thread = { id: threadId, projectId: creation.projectId ?? null,
             cwd: receipt.result.cwd ?? '', title: creation.prompt.trim().slice(0, 80) || '新对话 · 待发送',
             updatedAt: Date.now() / 1000, status: 'idle', pinned: false };
           localStorage.setItem(storageKey('empty-chats'), JSON.stringify([draftThread, ...emptyChats().filter(thread => thread.id !== threadId)]));
-          localStorage.setItem(storageKey('empty-chat-permission'), creation.emptyPermission);
+          if (receipt.result.permissionConfirmed !== false) localStorage.setItem(storageKey('empty-chat-permission'), permission);
           localStorage.setItem(storageKey('draft', threadId), creation.prompt);
           localStorage.setItem(storageKey('skills', threadId), JSON.stringify(creation.skills ?? []));
           localStorage.setItem(storageKey('thread-refs', threadId), JSON.stringify(creation.threadRefs ?? []));
           localStorage.setItem(storageKey('attachments', threadId), JSON.stringify(creation.attachments ?? []));
-          localStorage.setItem(storageKey('options', threadId), JSON.stringify({ model: creation.model, thinking: creation.thinking, expectedPermission: creation.emptyPermission }));
+          localStorage.setItem(storageKey('options', threadId), JSON.stringify({ model: creation.model, thinking: creation.thinking, expectedPermission: permission }));
+          if (receipt.result.firstMessageRequestId) {
+            const { model, thinking, attachments, skills, threadRefs } = creation;
+            localStorage.setItem(storageKey('pending', threadId), JSON.stringify({
+              requestId: receipt.result.firstMessageRequestId, prompt: creation.prompt, status: 'sending',
+              options: { model, thinking, attachments, skills, threadRefs, expectedPermission: permission },
+            }));
+          }
         }
         creation = null;
         localStorage.removeItem(storageKey('creation'));
@@ -2136,6 +2131,7 @@ element('new-chat-form').addEventListener('submit', event => { event.preventDefa
 element('create-empty-chat').addEventListener('click', () => {
   if (element<HTMLSelectElement>('new-chat-project').reportValidity()) void createChat(true);
 });
+element('new-chat-permission').addEventListener('change', saveNewChatDraft);
 element('new-chat-project').addEventListener('change', () => {
   element<HTMLSelectElement>('new-chat-project').setCustomValidity('');
   saveNewChatDraft();

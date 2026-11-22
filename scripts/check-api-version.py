@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as directory:
 
         base = "/api/" + version
         upload = {"id": str(uuid.uuid4()), "name": "sample.txt", "size": 0}
-        for prefix in ("/api", "/api/0.6.8-preview"):
+        for prefix in ("/api", "/api/0.6.9-preview"):
             for method, path, body in (("GET", "/status", None), ("POST", "/uploads", upload)):
                 status, payload = request(method, prefix + path, body)
                 assert status == 412 and "同步更新" in json.loads(payload)["error"], (prefix, status)
@@ -50,6 +50,10 @@ with tempfile.TemporaryDirectory() as directory:
         for old_path in ("/files/upload", "/files/preview"):
             assert request("POST", base + old_path, {})[0] == 404
         assert request("POST", base + "/threads/test/approval", {"policy": "never"})[0] == 422
+        create = {"requestId": str(uuid.uuid4()), "prompt": "first message"}
+        assert request("POST", base + "/threads", create)[0] == 422
+        assert request("POST", base + "/threads", dict(create, permissionMode="unknown"))[0] == 400
+        assert request("POST", base + "/threads", dict(create, permissionMode="full", prompt=""))[0] == 400
     finally:
         process.terminate()
         process.wait(timeout=10)

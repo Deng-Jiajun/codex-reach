@@ -514,6 +514,10 @@ impl Ipc {
         if active && next_turn_only {
             return Err(TurnActive.into());
         }
+        ensure!(
+            !active || options["expectedPermission"].is_null(),
+            "尚未发送：该对话已有运行中的轮次，请核对首条消息"
+        );
         let paths = options["attachments"]
             .as_array()
             .into_iter()
@@ -561,10 +565,16 @@ impl Ipc {
                     .await?;
                 ensure!(response["result"]["applied"] == true, "会话模型设置未应用");
             }
+            let request = turn_start_request(
+                id,
+                request_id,
+                &message["input"],
+                options["expectedPermission"].as_str(),
+            )?;
             self.request(
                 "thread-follower-start-turn",
                 json!({"conversationId":id,"turnStart":{
-                    "request":{"threadId":id,"input":message["input"],"clientUserMessageId":request_id},
+                    "request":request,
                     "context":{"attachments":message["attachments"],"inheritThreadSettings":true}
                 }}),
                 Some(owner),
@@ -574,6 +584,26 @@ impl Ipc {
         }
         Ok(())
     }
+}
+
+fn turn_start_request(
+    id: &str,
+    request_id: &str,
+    input: &Value,
+    permission: Option<&str>,
+) -> Result<Value> {
+    let mut request = match permission {
+        Some(id) => crate::permissions::MODES
+            .iter()
+            .find(|mode| mode.id == id)
+            .context("未知首轮权限")?
+            .settings(),
+        None => json!({}),
+    };
+    request["threadId"] = json!(id);
+    request["clientUserMessageId"] = json!(request_id);
+    request["input"] = input.clone();
+    Ok(request)
 }
 
 #[derive(Debug)]
@@ -742,6 +772,23 @@ fn apply_change(state: &mut Option<Value>, revision: &mut u64, change: &Value) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_turn_carries_the_selected_permission_and_message() {
+        let input = json!([{"type":"text","text":"hello"}]);
+        for mode in &crate::permissions::MODES {
+            let request = turn_start_request("chat", "message", &input, Some(mode.id)).unwrap();
+            assert_eq!(crate::permissions::current(&request), mode.id);
+            assert_eq!(request["input"], input);
+            assert_eq!(request["clientUserMessageId"], "message");
+        }
+        assert!(turn_start_request("chat", "message", &input, Some("custom")).is_err());
+        let inherited = turn_start_request("chat", "message", &input, None).unwrap();
+        assert_eq!(
+            inherited,
+            json!({"threadId":"chat","clientUserMessageId":"message","input":input})
+        );
+    }
 
     #[test]
     fn attachment_input_matches_native_context_and_round_trips_public_history() {

@@ -195,19 +195,3 @@ pub async fn resolve(
     }
     Ok(resolved)
 }
-
-pub fn first_prompt(prompt: &str, request_id: &str, options: &model::TurnOptions) -> String {
-    let prepared =
-        crate::desktop::prepare_message(prompt, request_id, &options.attachments, &json!([]));
-    let mut text = prepared["input"][0]["text"]
-        .as_str()
-        .unwrap_or(prompt)
-        .to_owned();
-    if !options.skills.is_empty() {
-        text.push_str("\n\nUse the following selected Skills for this request. Read their SKILL.md instructions.\n");
-        for skill in &options.skills {
-            text.push_str(&format!("- ${}: {}\n", skill.name, skill.path));
-        }
-    }
-    text
-}

@@ -666,13 +666,20 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path == "/api/threads":
                     task_state["created"] = request
                     task_state["createCount"] += 1
-                    task_state["task"] = {"model": request.get("model", "fixture-standard"), "thinking": request.get("thinking", "low"),
-                        "status": "active", "activeTurnId": "task-turn-1", "revision": 1, "turns": [
+                    task = {"model": request.get("model", "fixture-standard"), "thinking": request.get("thinking", "low"),
+                        "status": "idle", "activeTurnId": None, "revision": 1, "turns": []}
+                    task_state["task"] = task
+                    result = {"threadId": "fixture-task"}
+                    if "prompt" in request:
+                        task.update(status="active", activeTurnId="task-turn-1", turns=[
                             {"id": "task-turn-1", "status": "inProgress", "messages": [
                                 {"id": "task-user", "kind": "user", "text": request["prompt"], "phase": None},
                                 {"id": "task-created", "kind": "assistant", "text": "TASK_CREATED", "phase": None},
-                            ]}]}
-                    result = {"threadId": "fixture-task"}
+                            ]}])
+                        first_id = request_id + "-first"
+                        result["firstMessageRequestId"] = first_id
+                        task_state["requests"][first_id] = {"requestId": first_id, "chatId": "fixture-task",
+                            "status": "accepted", "error": None, "result": None}
                 elif self.path.endswith("/stop"):
                     task = task_state["task"]
                     task_state["stopRequests"].append(request)

@@ -16,7 +16,7 @@ pub struct AppServerClient {
 }
 
 impl AppServerClient {
-    pub async fn start_empty(&self, params: Value) -> Result<String> {
+    pub async fn start_empty(&self, params: Value, title: &str) -> Result<String> {
         // Release the creation process so the desktop can own the first turn.
         let mut server = AppServer::start().await?;
         let result = timeout(Duration::from_secs(30), server.call("thread/start", params))
@@ -28,7 +28,7 @@ impl AppServerClient {
             .to_owned();
         timeout(
             Duration::from_secs(15),
-            server.call("thread/name/set", json!({"threadId":id,"name":"新对话"})),
+            server.call("thread/name/set", json!({"threadId":id,"name":title})),
         )
         .await
         .context("保存空对话超时")??;

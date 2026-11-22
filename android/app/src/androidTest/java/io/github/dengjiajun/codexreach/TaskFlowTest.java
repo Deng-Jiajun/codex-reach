@@ -67,7 +67,7 @@ public class TaskFlowTest {
             assertEquals("\"NESTED_DRAFT\"", evaluate(webView, "document.querySelector('#new-chat-prompt').value"));
             evaluate(webView, "document.querySelector('#new-chat-project').value='fixture-project'; document.querySelector('#new-chat-project').dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('#new-chat-model').value='fixture-deep'; document.querySelector('#new-chat-model').dispatchEvent(new Event('change',{bubbles:true})); null");
             await(webView, "Boolean(document.querySelector('#new-chat-thinking option[value=\"xhigh\"]')) && !document.querySelector('#new-chat-thinking option[value=\"high\"]')");
-            evaluate(webView, "document.querySelector('#new-chat-thinking').value='xhigh'; document.querySelector('#new-chat-thinking').dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('#new-chat-prompt').value='TASK_CREATE_CHECK'; document.querySelector('#new-chat-prompt').dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#create-chat-button').click(); document.querySelector('#create-chat-button').click(); null");
+            evaluate(webView, "document.querySelector('#new-chat-thinking').value='xhigh'; document.querySelector('#new-chat-thinking').dispatchEvent(new Event('change',{bubbles:true})); document.querySelector('#new-chat-permission').value='full'; document.querySelector('#new-chat-prompt').value='TASK_CREATE_CHECK'; document.querySelector('#new-chat-prompt').dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#create-chat-button').click(); document.querySelector('#create-chat-button').click(); null");
             await(webView, "!document.querySelector('#chat-view').hidden && document.querySelector('#messages').textContent.includes('TASK_CREATED')");
             await(webView, "document.querySelector('#send-button').dataset.action==='stop' && !document.querySelector('#send-button').disabled");
             evaluate(webView, "document.querySelector('#message-input').value='待发送草稿'; document.querySelector('#message-input').dispatchEvent(new Event('input',{bubbles:true})); null");
@@ -77,6 +77,7 @@ public class TaskFlowTest {
             assertEquals("true", evaluate(webView, "document.querySelector('#send-button').dataset.action==='stop' && document.querySelector('#send-mode-button').hidden && getComputedStyle(document.querySelector('#chat-state'),'::before').animationName==='refresh-spin'"));
             JSONObject creation = stats().getJSONObject("created");
             assertEquals(1, stats().getInt("createCount"));
+            assertEquals("full", creation.getString("permissionMode"));
             assertEquals("fixture-project", creation.getString("projectId"));
             assertEquals("fixture-deep", creation.getString("model"));
             assertEquals("xhigh", creation.getString("thinking"));
