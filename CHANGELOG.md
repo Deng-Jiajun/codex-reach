@@ -4,6 +4,8 @@
 
 新建对话的「首轮权限」用于发送箭头和「仅创建，稍后发送」。选择请求批准、自动审批或完全访问后，服务先核对桌面权限；直接发送会继续提交首条消息。若权限未确认，首条消息保留在草稿中。两端需配套更新，Android `versionCode` 为 20。
 
+Windows 服务构建和 14 项 Android 16 模拟器回归通过。APK 与 0.6.8-preview 的签名一致，覆盖安装和 SQLite 数据保留检查通过。新建对话回归覆盖选择 Full access 后直接发送。[0.6.10 构建记录](https://github.com/Deng-Jiajun/codex-reach/actions/runs/44994328216)
+
 ## 0.6.9-preview
 
 手机与 Windows 服务通过同一 Reach 发布版本的 API 通信。连接、恢复保存的连接和 Android 后台提醒均使用版本路径。版本不符时提示同步更新；已保存的草稿、缓存和回执继续保留。
