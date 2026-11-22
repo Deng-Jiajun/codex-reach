@@ -58,6 +58,7 @@ public class NotificationService extends Service {
         current.setRequestProperty("Authorization", "Bearer " + key);
         try {
             int code = current.getResponseCode();
+            if (code == 412 || code == 404) throw new java.net.ProtocolException("版本不一致，请同步更新手机 APK 和电脑 Reach 服务");
             if (code != 200) throw new Exception("提醒连接失败，HTTP " + code);
             try (InputStream input = current.getInputStream(); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[16384]; int count;
@@ -80,7 +81,7 @@ public class NotificationService extends Service {
             String cursorKey = "cursor:" + serverId;
             try {
                 long cursor = settings.getLong(cursorKey, -1);
-                JSONObject page = request(settings.getString("url", "") + "/api/events?after=" + cursor + "&wait=true", settings.getString("key", ""));
+                JSONObject page = request(settings.getString("url", "") + "/api/" + BuildConfig.VERSION_NAME + "/events?after=" + cursor + "&wait=true", settings.getString("key", ""));
                 if (stopped || !settings.getBoolean("enabled", false) || !serverId.equals(settings.getString("serverId", ""))) continue;
                 JSONArray events = page.getJSONArray("events");
                 for (int index = 0; index < events.length(); index++) {
@@ -93,8 +94,9 @@ public class NotificationService extends Service {
                 delay = 1000;
             } catch (Exception error) {
                 if (stopped) break;
-                settings.edit().putString("error", "提醒连接中断，正在重新连接").apply();
-                manager.notify(SERVICE_NOTIFICATION, connectionNotification("连接中断，正在重新连接"));
+                String message = error instanceof java.net.ProtocolException ? error.getMessage() : "提醒连接中断，正在重新连接";
+                settings.edit().putString("error", message).apply();
+                manager.notify(SERVICE_NOTIFICATION, connectionNotification(message));
                 try { Thread.sleep(delay); } catch (InterruptedException interrupted) { break; }
                 delay = Math.min(30000, delay * 2);
             }

@@ -74,7 +74,7 @@ let followLatest = true;
 let restoringScroll: number | null = null;
 let connectionAttempt = 0;
 let inboxRetryTimer: ReturnType<typeof setTimeout> | undefined;
-let connectionError = '';
+let connectionError: unknown = '';
 let historyError = '';
 let streamError = '';
 let historyLoaded = false;
@@ -199,14 +199,19 @@ function showView(view: typeof currentView): void {
   renderConnection();
 }
 
+function versionMismatch(error: unknown): error is ReachError {
+  return error instanceof ReachError && error.status === 412;
+}
+
 function renderConnection(): void {
-  const label = connected ? '已连接' : connection ? '重连中' : '未连接';
+  const mismatch = versionMismatch(connectionError);
+  const label = connected ? '已连接' : connection ? (mismatch ? '需同步更新' : '重连中') : '未连接';
   for (const badge of document.querySelectorAll<HTMLElement>('[data-connection-status]')) {
     badge.textContent = label;
     badge.dataset.connected = String(connected);
   }
   element('reconnect-notice').hidden = !connection || connected || currentView === 'connection';
-  element('reconnect-text').textContent = `正在重连，当前内容和草稿已保留。${connectionError}`;
+  element('reconnect-text').textContent = mismatch ? errorText(connectionError) : `正在重连，当前内容和草稿已保留。${errorText(connectionError)}`;
   element<HTMLButtonElement>('new-chat-button').disabled = !connected;
 }
 
@@ -385,11 +390,10 @@ async function connect(): Promise<void> {
     }
     const candidate: Connection = { url: url.origin, key: keyInput.value.trim(), serverId: '' };
     const nextClient = new ReachClient(candidate);
-    const status = await nextClient.request<Pick<Connection, 'serverId' | 'desktopLocale' | 'emptyThreadCreation'>>('/status');
+    const status = await nextClient.getStatus();
     if (attempt !== connectionAttempt) return;
     candidate.serverId = status.serverId;
     candidate.desktopLocale = status.desktopLocale;
-    candidate.emptyThreadCreation = status.emptyThreadCreation;
     const sameServer = candidate.serverId === connection?.serverId;
     const returnToChat = settingsReturnView === 'chat' && sameServer;
     stopUpdates();
@@ -855,13 +859,13 @@ async function refreshHistory(id: string, token: number): Promise<void> {
 async function checkConnectionAfterError(error: unknown, token: number, currentRequest: () => boolean = () => true): Promise<void> {
   let reachable = false;
   let failure = error;
-  if (client && error instanceof ReachError && error.status !== 401) {
-    try { await client.request('/status'); reachable = true; }
+  if (client && error instanceof ReachError && error.status !== 401 && error.status !== 412) {
+    try { await client.getStatus(); reachable = true; }
     catch (statusError) { failure = statusError; }
   }
   if (token !== generation || !currentRequest()) return;
   connected = reachable;
-  connectionError = reachable ? '' : errorText(failure);
+  connectionError = reachable ? '' : failure;
   renderConnection();
 }
 
@@ -1026,17 +1030,39 @@ async function followChat(id: string, token: number): Promise<void> {
   }
 }
 
-async function loadAnnotationSource(annotation: ResponseAnnotation): Promise<Message> {
-  if (!selected || !annotation.source) throw new Error('来源不可用，摘录已保留');
+async function findInChatHistory<T>(find: (message: Message) => T | undefined, active = () => true): Promise<T | undefined> {
+  let page = selected;
   const token = generation;
-  const find = () => selected?.turns.flatMap(turn => turn.messages).find(message => message.id === annotation.source!.messageId);
-  let source = find();
-  while (!source && selected.nextCursor && client) {
-    const page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(selected.id)}/history?cursor=${encodeURIComponent(selected.nextCursor)}`);
-    if (token !== generation) throw new Error('已切换对话');
-    selected = prependHistory(selected, page);
-    source = find();
+  const cursors = new Set<string>();
+  while (page && active()) {
+    for (const turn of page.turns) {
+      for (const message of turn.messages) {
+        const match = find(message);
+        if (match !== undefined) return match;
+      }
+    }
+    const cursor: string | null = page.nextCursor;
+    if (!cursor) return;
+    if (!client || !connected) throw new Error('请连接电脑后重试');
+    if (cursors.has(cursor)) throw new Error('历史分页重复，请刷新后重试');
+    cursors.add(cursor);
+    page = await client.request<HistoryPage>(`/threads/${encodeURIComponent(page.id)}/history?cursor=${encodeURIComponent(cursor)}`);
+    if (token !== generation) throw new Error('对话已刷新，请重试');
   }
+}
+
+function showAnnotationMarker(index: number, annotation?: ResponseAnnotation, id?: string): void {
+  void openAnnotationDetail(index, async isOpen => {
+    if (annotation || !id) return annotation;
+    return findInChatHistory(message => message.responseAnnotations?.find(item => item.id === id)
+      ?? message.requestAnnotations?.find(item => item.id === id), isOpen);
+  }, showAnnotationSource);
+}
+
+async function loadAnnotationSource(annotation: ResponseAnnotation): Promise<Message> {
+  const messageId = annotation.source?.messageId;
+  if (!messageId) throw new Error('来源不可用，摘录已保留');
+  const source = await findInChatHistory(message => message.id === messageId ? message : undefined);
   if (!source) throw new Error('来源已不可用，摘录已保留');
   return source;
 }
@@ -1052,7 +1078,7 @@ async function showAnnotationSource(annotation: ResponseAnnotation): Promise<voi
   close.addEventListener('click', () => dialog.close());
   const content = document.createElement('div');
   content.className = 'message-content';
-  renderMarkdown(content, source.text, source.requestAnnotations ?? [], client, () => {}, selected?.cwd, threadNavigation);
+  renderMarkdown(content, source.text, source.requestAnnotations ?? [], client, showAnnotationMarker, selected?.cwd, threadNavigation);
   const header = document.createElement('div'); header.className = 'dialog-header';
   const title = document.createElement('h2'); title.textContent = '引用来源';
   header.append(title, close);
@@ -1134,7 +1160,7 @@ function renderMessage(message: Message, key: string, answers: Map<string, strin
   if (node.dataset.body !== body || node.dataset.annotationKey !== annotationKey) {
     content.hidden = !body.trim();
     if (message.kind === 'user' || message.kind === 'tool') content.textContent = body;
-    else renderMarkdown(content, body, annotations, client, (annotation, index) => openAnnotationDetail(annotation, index, showAnnotationSource), selected?.cwd, threadNavigation);
+    else renderMarkdown(content, body, annotations, client, showAnnotationMarker, selected?.cwd, threadNavigation);
     node.dataset.body = body;
     node.dataset.annotationKey = annotationKey;
   }
@@ -1567,14 +1593,23 @@ async function sendPrompt(prompt: string, options: TurnOptions, replies?: Questi
   pending = request;
   localStorage.setItem(storageKey('pending', id), JSON.stringify(request));
   renderChat();
+  let submitted = false;
   try {
     await client.request(`/threads/${encodeURIComponent(id)}/${queued ? 'queue' : 'messages'}`, 'POST', { requestId: request.requestId, prompt: annotationPrompt(request.prompt, request.annotations), ...request.options });
+    submitted = true;
     while (token === generation && pending?.requestId === request.requestId && pending.status !== 'unknown') {
       await checkReceipt(token);
       if (pending) await new Promise(resolve => setTimeout(resolve, 500));
     }
   } catch (error) {
     if (token !== generation) return;
+    if (!submitted && versionMismatch(error)) {
+      pending = null;
+      localStorage.removeItem(storageKey('pending', id));
+      inform(error.message);
+      renderChat();
+      return;
+    }
     if (pending) { pending.status = 'unknown'; pending.error = `投递结果待确认。${errorText(error)}`; }
     localStorage.setItem(storageKey('pending', id), JSON.stringify(pending));
     renderChat();
@@ -1621,7 +1656,6 @@ function renderCreation(): void {
   const button = element<HTMLButtonElement>('create-chat-button');
   button.disabled = awaitingFirstCatalog || Boolean(creation) || Boolean(client && uploadCount(client, storageKey('attachments', '__new__')));
   element<HTMLButtonElement>('create-empty-chat').disabled = button.disabled;
-  element('empty-chat-details').hidden = !connection?.emptyThreadCreation;
   setIcon(button, 'send', creation?.status === 'unknown' ? '结果待确认' : creation ? '正在创建…' : '创建并发送');
   const catalogStatus = modelChoices.length ? '正在更新模型选项…' : '正在读取模型选项…';
   element('new-chat-status').textContent = newFormLoading ? catalogStatus
@@ -1699,10 +1733,10 @@ async function createChat(empty = false): Promise<void> {
     }
   } catch (error) {
     if (connection?.serverId !== serverId || creation?.requestId !== request.requestId) return;
-    if (empty && error instanceof ReachError && [400, 404, 422].includes(error.status)) {
+    if (versionMismatch(error) || (empty && error instanceof ReachError && [400, 404, 422].includes(error.status))) {
       creation = null;
       localStorage.removeItem(storageKey('creation'));
-      newFormError = error.status === 404 ? '请更新电脑 Reach 服务后再创建空对话。' : errorText(error);
+      newFormError = errorText(error);
       saveNewChatDraft();
       renderCreation();
       return;
@@ -1809,15 +1843,11 @@ async function openParameters(draft = turnOptions): Promise<void> {
   element('permission-modes').replaceChildren();
   element('open-approval-chat').hidden = true;
   element('permission-status').textContent = '正在读取权限模式…';
-  void optionsClient.request<{ available: boolean; mode?: string; modes?: { mode: string; enabled: boolean; reason?: string }[] }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
+  void optionsClient.request<{ available: boolean; mode: string; modes: { mode: string; enabled: boolean; reason?: string }[] }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
     if (!current()) return;
     if (!settings.available) {
       element('permission-status').textContent = '桌面加载该对话后可读取权限模式';
       element('open-approval-chat').hidden = false;
-      return;
-    }
-    if (!settings.mode || !settings.modes) {
-      element('permission-status').textContent = '请更新电脑 Reach 服务，以读取完整权限模式。';
       return;
     }
     const labels: Record<string, [string, string]> = {
@@ -1917,6 +1947,12 @@ async function stopTask(): Promise<void> {
   try { await client.request(`/threads/${encodeURIComponent(id)}/stop`, 'POST', stopOperation); }
   catch (error) {
     if (token !== generation || !stopOperation) return;
+    if (versionMismatch(error)) {
+      clearStopOperation();
+      inform(error.message);
+      renderChat();
+      return;
+    }
     stopOperation.error = `停止结果待确认。${errorText(error)}`;
     localStorage.setItem(storageKey('stop', id), JSON.stringify(stopOperation));
   }
@@ -2062,6 +2098,12 @@ async function performInteraction(operation: Interaction, body: Record<string, u
   try { await client.request(`/threads/${encodeURIComponent(id)}/${operation.kind}`, 'POST', { ...body, requestId: operation.requestId }); }
   catch (error) {
     if (token !== generation || interaction?.requestId !== operation.requestId) return;
+    if (versionMismatch(error)) {
+      clearInteraction();
+      inform(error.message);
+      renderChat();
+      return;
+    }
     operation.error = `操作结果待确认。${errorText(error)}`;
     localStorage.setItem(storageKey('interaction', id), JSON.stringify(operation));
   }
@@ -2462,10 +2504,9 @@ async function refreshDesktopLocale(): Promise<void> {
   const current = client;
   if (!current || !connection) return;
   try {
-    const status = await current.request<Pick<Connection, 'serverId' | 'desktopLocale' | 'emptyThreadCreation'>>('/status');
+    const status = await current.getStatus();
     if (client !== current || status.serverId !== connection.serverId) return;
     connection.desktopLocale = status.desktopLocale;
-    connection.emptyThreadCreation = status.emptyThreadCreation;
     if (newDialog.open) renderCreation();
     localStorage.setItem('codex-reach-connection', JSON.stringify(connection));
     if (selected) renderChat();

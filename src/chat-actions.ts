@@ -111,8 +111,8 @@ export function annotationPrompt(prompt: string, annotations: ResponseAnnotation
   return `\n# Response annotations:\nEach item contains text selected from an earlier Codex response and may include a user comment. Treat items as Annotation 1, Annotation 2, and so on in array order. Use every selection as context and address every comment.\n<response-annotations>\n${JSON.stringify(annotations)}\n</response-annotations>\n\n## My request:\n${prompt}`;
 }
 
-export function openAnnotationDetail(annotation: ResponseAnnotation, index: number,
-  onSource: (annotation: ResponseAnnotation) => Promise<void>): void {
+export async function openAnnotationDetail(index: number, load: (isOpen: () => boolean) => Promise<ResponseAnnotation | undefined>,
+  onSource: (annotation: ResponseAnnotation) => Promise<void>): Promise<void> {
   const dialog = document.createElement('dialog');
   dialog.className = 'task-dialog annotation-detail';
   const header = document.createElement('div');
@@ -126,12 +126,21 @@ export function openAnnotationDetail(annotation: ResponseAnnotation, index: numb
   title.textContent = `引用 ${index + 1}`;
   header.append(close, title);
   const body = document.createElement('div');
-  renderAnnotations(body, [annotation], undefined, undefined, onSource, index);
-  body.querySelector('details')!.open = true;
+  body.textContent = '正在查找引用…';
   dialog.append(header, body);
   dialog.addEventListener('close', () => dialog.remove(), { once: true });
   document.body.append(dialog);
   showDialog(dialog);
+  try {
+    const annotation = await load(() => dialog.open);
+    if (!dialog.open) return;
+    if (annotation) {
+      renderAnnotations(body, [annotation], undefined, undefined, onSource, index);
+      body.querySelector('details')!.open = true;
+    } else body.textContent = '当前对话历史中找不到这条引用。';
+  } catch (error) {
+    if (dialog.open) body.textContent = `读取引用失败。${error instanceof Error ? error.message : '请重试'}`;
+  }
 }
 
 export function openAnnotation(text: string, messageId: string, selection: TextSelection | undefined,

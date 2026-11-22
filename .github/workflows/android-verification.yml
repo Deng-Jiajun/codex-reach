@@ -33,6 +33,7 @@ jobs:
           cargo +1.96.0 fmt --manifest-path server/Cargo.toml --check
           cargo +1.96.0 test --manifest-path server/Cargo.toml --locked
           cargo +1.96.0 build --manifest-path server/Cargo.toml --release --locked
+          python -X utf8 scripts/check-api-version.py server/target/release/codex-reach-server.exe
           npm ci --no-fund
           npm test
           npm run build

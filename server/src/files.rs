@@ -1,12 +1,9 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    fs,
     path::{Component, Path, PathBuf},
 };
-
-pub const MAX_FILE_BYTES: usize = 20 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct FileAttachment {
@@ -29,11 +26,6 @@ pub struct DirectoryListing {
     pub path: Option<String>,
     pub parent: Option<String>,
     pub entries: Vec<FileEntry>,
-}
-
-pub struct Preview {
-    pub mime: &'static str,
-    pub bytes: Vec<u8>,
 }
 
 #[link(name = "kernel32")]
@@ -145,71 +137,6 @@ pub fn resolve(paths: &[String]) -> Result<Vec<FileAttachment>> {
         .collect()
 }
 
-pub fn upload(root: &Path, name: &str, bytes: &[u8]) -> Result<FileAttachment> {
-    let name_path = Path::new(name);
-    ensure!(
-        !name.is_empty()
-            && !name.contains(['/', '\\', ':', '\r', '\n'])
-            && matches!(name_path.components().next(), Some(Component::Normal(_)))
-            && name_path.components().count() == 1,
-        "上传文件名无效"
-    );
-    ensure!(bytes.len() <= MAX_FILE_BYTES, "上传文件不能超过 20 MiB");
-    ensure!(root.is_absolute(), "上传目录必须使用绝对路径");
-    let directory = date_directory(root);
-    fs::create_dir_all(&directory).context("无法创建上传目录")?;
-    let mut index = 0;
-    let (path, mut file) = loop {
-        let path = numbered_path(&directory, name, index);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => break (path, file),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => index += 1,
-            Err(error) => return Err(error.into()),
-        }
-    };
-    let result = (|| -> Result<FileAttachment> {
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        Ok(FileAttachment {
-            path: display_path(&path)?,
-            name: path.file_name().unwrap().to_string_lossy().into_owned(),
-            directory: false,
-            image: is_image_path(&path),
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&path);
-    }
-    result
-}
-
-pub fn preview(path: &str) -> Result<Preview> {
-    let path = absolute_path(path)?;
-    let file = File::open(path).context("图片文件不可用")?;
-    let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "预览路径必须是文件");
-    ensure!(
-        metadata.len() <= MAX_FILE_BYTES as u64,
-        "预览图片不能超过 20 MiB"
-    );
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= MAX_FILE_BYTES, "预览图片不能超过 20 MiB");
-    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        "image/png"
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        "image/jpeg"
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        "image/gif"
-    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
-        "image/webp"
-    } else {
-        bail!("仅支持 PNG、JPEG、GIF、WebP 图片预览");
-    };
-    Ok(Preview { mime, bytes })
-}
-
 pub fn is_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
@@ -244,34 +171,19 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn upload_keeps_filename_isolates_duplicates_and_browses_directory() {
+    fn browses_directory_and_resolves_existing_files() {
         let root = std::env::temp_dir().join(format!("codex-reach-files-{}", Uuid::new_v4()));
-        let first = upload(&root, "资料.txt", b"first").unwrap();
-        let second = upload(&root, "资料.txt", b"second").unwrap();
-        assert_eq!(first.name, "资料.txt");
-        assert_ne!(first.path, second.path);
-        assert_eq!(fs::read(&first.path).unwrap(), b"first");
+        fs::create_dir(&root).unwrap();
+        let path = root.join("资料.txt");
+        fs::write(&path, b"first").unwrap();
         let listing = browse(Some(root.to_str().unwrap())).unwrap();
         assert_eq!(listing.entries.len(), 1);
-        assert!(listing.entries.iter().all(|entry| entry.directory));
-        assert_eq!(second.name, "资料 (1).txt");
-        assert!(upload(&root, "../outside.txt", b"data").is_err());
+        assert_eq!(listing.entries[0].name, "资料.txt");
+        assert_eq!(
+            resolve(&[display_path(&path).unwrap()]).unwrap()[0].name,
+            "资料.txt"
+        );
         assert!(resolve(&["relative.txt".to_owned()]).is_err());
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn preview_checks_bitmap_bytes_and_enforces_limit() {
-        let root = std::env::temp_dir().join(format!("codex-reach-preview-{}", Uuid::new_v4()));
-        let image = upload(&root, "sample.png", b"\x89PNG\r\n\x1a\n").unwrap();
-        assert_eq!(preview(&image.path).unwrap().mime, "image/png");
-        let fake = upload(&root, "fake.png", b"<svg></svg>").unwrap();
-        assert!(preview(&fake.path).is_err());
-        File::create(&fake.path)
-            .unwrap()
-            .set_len(MAX_FILE_BYTES as u64 + 1)
-            .unwrap();
-        assert!(preview(&fake.path).is_err());
         fs::remove_dir_all(root).unwrap();
     }
 }

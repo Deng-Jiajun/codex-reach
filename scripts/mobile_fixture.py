@@ -93,8 +93,7 @@ def get(handler, url, organization, files, png):
         handler.reply({"available": False})
     elif path.endswith("/approval"):
         handler.reply({
-            "available": True, "approvalPolicy": "never",
-            "allowed": ["never", "on-request", "untrusted"], "mode": "full",
+            "available": True, "mode": "full",
             "modes": [{"mode": mode, "enabled": True} for mode in ["ask", "auto", "full"]],
         })
     elif path == "/api/events":

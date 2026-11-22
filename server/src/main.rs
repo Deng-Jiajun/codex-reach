@@ -15,13 +15,12 @@ mod uploads;
 use anyhow::{Context, Result, bail, ensure};
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
-use base64::{Engine, engine::general_purpose::STANDARD};
 use desktop::{AppTools, Ipc};
 use outbox::{Outbox, Receipt};
 use serde::{Deserialize, Serialize};
@@ -55,7 +54,6 @@ struct AppState {
     queue: queue::Queue,
     events: events::Events,
     send_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-    upload_directory: PathBuf,
     workspace_directory: PathBuf,
     context_directory: PathBuf,
     uploads: Arc<uploads::Uploads>,
@@ -262,7 +260,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiEr
         .call("config/read", json!({"includeLayers":false}))
         .await?;
     Ok(Json(
-        json!({"serverId":state.config.server_id,"version":env!("CARGO_PKG_VERSION"),"desktopConnected":true,"emptyThreadCreation":true,"desktopLocale":configuration["config"]["desktop"]["localeOverride"]}),
+        json!({"serverId":state.config.server_id,"version":env!("CARGO_PKG_VERSION"),"desktopConnected":true,"desktopLocale":configuration["config"]["desktop"]["localeOverride"]}),
     ))
 }
 
@@ -341,7 +339,6 @@ async fn approval_settings(
     let config = permission_config(&state, &id).await?;
     Ok(Json(
         json!({"available":view["available"] == true && !view["approvalPolicy"].is_null(),
-        "approvalPolicy":view["approvalPolicy"],"allowed":requirements["requirements"]["allowedApprovalPolicies"],
         "mode":permissions::current(&view["permissionSettings"]),
         "modes":permissions::choices(&requirements["requirements"], &config)}),
     ))
@@ -363,57 +360,34 @@ async fn permission_config(state: &AppState, id: &str) -> Result<Value, ApiError
 }
 
 #[derive(Deserialize)]
-struct ApprovalPolicyRequest {
-    policy: Option<String>,
-    mode: Option<String>,
+#[serde(deny_unknown_fields)]
+struct PermissionRequest {
+    mode: String,
 }
 
 async fn set_approval(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(input): Json<ApprovalPolicyRequest>,
+    Json(input): Json<PermissionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let requirements = state
         .app_server
         .call("configRequirements/read", json!({}))
         .await?;
-    if let Some(id_mode) = input.mode {
-        if input.policy.is_some() {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "权限模式与单独审批策略不能同时提交".to_owned(),
-            ));
-        }
-        let mode = permissions::MODES
-            .iter()
-            .find(|mode| mode.id == id_mode)
-            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "权限模式无效".to_owned()))?;
-        let config = permission_config(&state, &id).await?;
-        if let Some(reason) = mode.unavailable_reason(&requirements["requirements"], &config) {
-            return Err(ApiError(StatusCode::BAD_REQUEST, reason.to_owned()));
-        }
-        state
-            .ipc()
-            .await?
-            .update_permissions(&id, mode.settings())
-            .await?;
-        return Ok(Json(json!({"mode":mode.id,"scope":"nextTurn"})));
+    let mode = permissions::MODES
+        .iter()
+        .find(|mode| mode.id == input.mode)
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "权限模式无效".to_owned()))?;
+    let config = permission_config(&state, &id).await?;
+    if let Some(reason) = mode.unavailable_reason(&requirements["requirements"], &config) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, reason.to_owned()));
     }
-    let policy = input
-        .policy
-        .filter(|policy| matches!(policy.as_str(), "untrusted" | "on-request" | "never"))
-        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "审批策略无效".to_owned()))?;
-    if let Some(allowed) = requirements["requirements"]["allowedApprovalPolicies"].as_array() {
-        if !allowed.iter().any(|value| value == &policy) {
-            return Err(ApiError(
-                StatusCode::BAD_REQUEST,
-                "当前配置不允许选择该审批策略".to_owned(),
-            ));
-        }
-    }
-    Ok(Json(
-        state.ipc().await?.update_approval(&id, &policy).await?,
-    ))
+    state
+        .ipc()
+        .await?
+        .update_permissions(&id, mode.settings())
+        .await?;
+    Ok(Json(json!({"mode":mode.id,"scope":"nextTurn"})))
 }
 
 async fn open_thread(
@@ -783,12 +757,6 @@ async fn resolve_files(Json(input): Json<FilePaths>) -> Result<Json<Value>, ApiE
     Ok(Json(json!({"attachments":attachments})))
 }
 
-#[derive(Deserialize)]
-struct UploadRequest {
-    name: String,
-    data: String,
-}
-
 async fn start_upload(
     State(state): State<Arc<AppState>>,
     Json(input): Json<uploads::Start>,
@@ -859,42 +827,6 @@ async fn finish_upload(
         tokio::task::spawn_blocking(move || uploads.finish(&id))
             .await
             .map_err(anyhow::Error::from)??,
-    ))
-}
-
-async fn upload_file(
-    State(state): State<Arc<AppState>>,
-    Json(input): Json<UploadRequest>,
-) -> Result<Json<files::FileAttachment>, ApiError> {
-    let directory = state.upload_directory.clone();
-    let attachment = tokio::task::spawn_blocking(move || -> Result<_> {
-        ensure!(
-            input.data.len() <= 28_000_000,
-            "单个上传文件不能超过 20 MiB"
-        );
-        let bytes = STANDARD.decode(input.data).context("文件编码无效")?;
-        ensure!(
-            bytes.len() <= 20 * 1024 * 1024,
-            "单个上传文件不能超过 20 MiB"
-        );
-        files::upload(&directory, &input.name, &bytes)
-    })
-    .await
-    .map_err(anyhow::Error::from)??;
-    Ok(Json(attachment))
-}
-
-#[derive(Deserialize)]
-struct PreviewRequest {
-    path: String,
-}
-
-async fn preview_file(Json(input): Json<PreviewRequest>) -> Result<Json<Value>, ApiError> {
-    let preview = tokio::task::spawn_blocking(move || files::preview(&input.path))
-        .await
-        .map_err(anyhow::Error::from)??;
-    Ok(Json(
-        json!({"mime":preview.mime,"data":STANDARD.encode(preview.bytes)}),
     ))
 }
 
@@ -1148,7 +1080,6 @@ async fn main() -> Result<()> {
         queue: queue::Queue::open(&directory.join("queue.db"))?,
         events: events::Events::open(&directory.join("events.db"))?,
         send_locks: Mutex::new(HashMap::new()),
-        upload_directory: std::path::absolute(directory.join("uploads"))?,
         workspace_directory: std::path::absolute(directory.join("workspaces"))?,
         context_directory: std::path::absolute(directory.join("contexts"))?,
         uploads: Arc::new(uploads::Uploads::open(&std::path::absolute(
@@ -1178,16 +1109,11 @@ async fn main() -> Result<()> {
         .route("/context", get(context::choices))
         .route("/files", get(browse_files))
         .route("/files/resolve", post(resolve_files))
-        .route("/files/preview", post(preview_file))
         .route("/files/read", post(open_document))
         .route("/uploads", post(start_upload))
         .route("/uploads/{id}", get(upload_status))
         .route("/uploads/{id}/chunk", post(upload_chunk))
         .route("/uploads/{id}/finish", post(finish_upload))
-        .route(
-            "/files/upload",
-            post(upload_file).layer(DefaultBodyLimit::max(28_010_000)),
-        )
         .route("/threads", get(threads).post(create_thread))
         .route("/threads/empty", post(empty_thread::create))
         .route("/threads/{id}/history", get(history))
@@ -1218,7 +1144,20 @@ async fn main() -> Result<()> {
         .route("/threads/{id}/queue", get(queue::list).post(queue::add))
         .route("/threads/{id}/queue/{request_id}", post(queue::change))
         .route("/requests/{id}", get(receipt))
-        .route_layer(middleware::from_fn_with_state(
+        .fallback(|| async { StatusCode::NOT_FOUND });
+    // Versioned paths keep new clients from dispatching operations to pre-versioned services.
+    let api = Router::new()
+        .nest(concat!("/", env!("CARGO_PKG_VERSION")), api)
+        .fallback(|| async {
+            ApiError(
+                StatusCode::PRECONDITION_FAILED,
+                format!(
+                    "电脑 Reach 服务版本为 {}，请同步更新手机 APK 和电脑服务。",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            )
+        })
+        .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             authorize,
         ))

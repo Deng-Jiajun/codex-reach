@@ -398,12 +398,6 @@ impl Ipc {
         Ok((!settings.is_null()).then(|| settings.clone()))
     }
 
-    pub async fn update_approval(&self, id: &str, policy: &str) -> Result<Value> {
-        self.update_permissions(id, json!({"approvalPolicy":policy}))
-            .await?;
-        Ok(json!({"approvalPolicy":policy,"scope":"nextTurn"}))
-    }
-
     pub async fn update_permissions(&self, id: &str, settings: Value) -> Result<Value> {
         let owner = self.follow(id).await?.context("请先在桌面加载该对话")?;
         let response = self

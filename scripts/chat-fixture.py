@@ -1,14 +1,15 @@
 """Serve synthetic chat data for the Android HTTP and persistence checks."""
 
-import base64
 import copy
 import json
 import threading
 import time
 import mobile_fixture
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+reach_version = json.loads((Path(__file__).resolve().parents[1] / "package.json").read_text(encoding="utf-8"))["version"]
 condition = threading.Condition()
 state = {
     "online": True,
@@ -298,7 +299,19 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def select_api_version(self):
+        if not self.path.startswith("/api/"):
+            return True
+        prefix = "/api/" + reach_version + "/"
+        if not self.path.startswith(prefix):
+            self.reply({"error": "请同步更新手机 APK 和电脑 Reach 服务"}, 412)
+            return False
+        self.path = "/api/" + self.path[len(prefix):]
+        return True
+
     def do_GET(self):
+        if not self.select_api_version():
+            return
         url = urlparse(self.path)
         if (url.path.startswith("/reader/") or url.path.startswith("/control/mobile")) and mobile_fixture.get(self, url, organization_state, organization_files, organization_png):
             return
@@ -330,7 +343,7 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(1)
         with condition:
             if url.path == "/api/status":
-                result = {"serverId": "android-fixture", "version": "0.2.0", "desktopConnected": True}
+                result = {"serverId": "android-fixture", "version": reach_version, "desktopConnected": True}
             elif url.path == "/api/projects":
                 result = {"projects": [{"id": "fixture-project", "name": "验证项目", "path": "C:\\Example"}]}
             elif url.path == "/api/models":
@@ -473,6 +486,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(result)
 
     def do_POST(self):
+        if not self.select_api_version():
+            return
         if mobile_fixture.post(self, organization_state, organization_files, organization_png):
             return
         if self.path in ("/control/organization-reset", "/control/release-organization-message"):
@@ -577,28 +592,6 @@ class Handler(BaseHTTPRequestHandler):
                         self.reply({"error": "合成附件不存在"}, 404)
                         return
                     self.reply({"attachments": [files[path] for path in request["paths"]]})
-                elif self.path == "/api/files/upload":
-                    data = base64.b64decode(request["data"], validate=True)
-                    if len(data) > 20 * 1024 * 1024:
-                        self.reply({"error": "上传文件不能超过 20 MiB"}, 422)
-                        return
-                    path = "C:/Example/uploads/" + str(len(organization_state["uploadRequests"]) + 1) + "/" + request["name"]
-                    attachment = {"path": path, "name": request["name"], "directory": False,
-                        "image": request["name"].lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))}
-                    organization_state["uploadedFiles"][path] = attachment
-                    organization_state["uploadedData"][path] = request["data"]
-                    organization_state["uploadRequests"].append({"name": request["name"], "size": len(data), "path": path})
-                    self.reply(attachment)
-                elif self.path == "/api/files/preview":
-                    path = request["path"]
-                    organization_state["previewRequests"].append(request)
-                    data = organization_state["uploadedData"].get(path)
-                    if data is None and path in ("C:/Example/photo.png", "C:/Example/history.png"):
-                        data = organization_png
-                    if data is None:
-                        self.reply({"error": "合成图片不存在"}, 404)
-                        return
-                    self.reply({"mime": "image/png", "data": data})
                 else:
                     self.reply({"error": "Unknown fixture endpoint"}, 404)
             return

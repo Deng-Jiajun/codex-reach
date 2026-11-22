@@ -86,7 +86,7 @@ export async function copyText(text: string, button: HTMLButtonElement): Promise
 }
 
 export function renderMarkdown(container: HTMLElement, body: string, annotations: ResponseAnnotation[],
-  client: ReachClient | null, onAnnotation: (annotation: ResponseAnnotation, index: number) => void, root?: string, navigation?: ThreadNavigation): void {
+  client: ReachClient | null, onAnnotation: (index: number, annotation?: ResponseAnnotation, id?: string) => void, root?: string, navigation?: ThreadNavigation): void {
   const template = document.createElement('template');
   const renderer = new Renderer();
   renderer.code = token => {
@@ -170,12 +170,14 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
   while (walker.nextNode()) texts.push(walker.currentNode as Text);
   for (const text of texts) {
     if (text.parentElement?.closest('code, pre, a, button')) continue;
-    const pattern = /:codex-annotation\{index="([1-9]\d*)"(?:\s+id="[^"{}]+")?\}/g;
+    const pattern = /:codex-annotation\{index="([1-9]\d*)"(?:\s+id="([^"{}]+)")?\}/g;
     const fragment = document.createDocumentFragment();
     let end = 0;
     for (const match of text.data.matchAll(pattern)) {
       const index = Number(match[1]) - 1;
-      if (!annotations[index]) continue;
+      const id = match[2];
+      const annotation = id ? annotations.find(item => item.id === id) : annotations[index];
+      if (!id && !annotation) continue;
       fragment.append(text.data.slice(end, match.index));
       const marker = document.createElement('button');
       marker.type = 'button';
@@ -183,7 +185,7 @@ export function renderMarkdown(container: HTMLElement, body: string, annotations
       marker.textContent = `引用 ${index + 1}`;
       const nativeLabel = ['zh-CN', 'zh-Hans'].includes(client?.connection.desktopLocale ?? '') ? '注释' : 'Annotation';
       marker.dataset.sourceText = `${nativeLabel} ${index + 1}`;
-      marker.addEventListener('click', () => onAnnotation(annotations[index], index));
+      marker.addEventListener('click', () => onAnnotation(index, annotation, id));
       fragment.append(marker);
       end = match.index! + match[0].length;
     }
