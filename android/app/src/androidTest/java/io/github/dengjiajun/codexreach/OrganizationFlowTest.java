@@ -302,6 +302,11 @@ public class OrganizationFlowTest {
         assertEquals(1, stats().getInt("sendPosts"));
         assertEquals(1, stats().getInt("sendCount"));
 
+        control("organization-no-live");
+        await(webView, "document.querySelector('#chat-state').dataset.status===''");
+        evaluate(webView, "document.querySelector('#parameters-button').click();null");
+        await(webView, "document.querySelector('#permission-status').textContent.includes('最近已应用：完全访问')");
+        evaluate(webView, "document.querySelector('#options-dialog').close();null");
         openPicker(webView);
         evaluate(webView, "document.querySelector('.files-entry[aria-label=\"选择文件 desktop.txt\"]').click(); null");
         awaitSelectedFiles(webView, 1);
@@ -309,6 +314,7 @@ public class OrganizationFlowTest {
         assertEquals("false", evaluate(webView, "document.querySelector('#send-button').disabled"));
         evaluate(webView, "document.querySelector('#message-form').requestSubmit(); document.querySelector('#message-form').requestSubmit(); null");
         awaitCount("messageRequests", 2);
+        await(webView, "document.querySelector('#delivery-text').textContent.includes('已排队') && document.querySelectorAll('#selected-files .attachment-chip').length===1");
         JSONObject attachmentOnly = stats().getJSONArray("messageRequests").getJSONObject(1);
         assertEquals("", attachmentOnly.getString("prompt"));
         assertEquals(1, attachmentOnly.getJSONArray("attachments").length());

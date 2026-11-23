@@ -7,6 +7,12 @@ use crate::files::FileAttachment;
 pub struct TurnOptions {
     #[serde(
         default,
+        rename = "steerTurnId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub steer_turn_id: Option<String>,
+    #[serde(
+        default,
         rename = "expectedPermission",
         skip_serializing_if = "Option::is_none"
     )]

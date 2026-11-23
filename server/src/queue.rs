@@ -143,7 +143,7 @@ impl Queue {
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("队列数据库锁不可用"))?;
-        db.execute("UPDATE queue SET status=?2,error=?3,version=version+1 WHERE request_id=?1 AND status IN ('sending','unknown')", params![id,status,error])?;
+        db.execute("UPDATE queue SET status=?2,error=?3,version=version+1 WHERE request_id=?1 AND status IN ('sending','unknown','desktopQueued')", params![id,status,error])?;
         Ok(())
     }
 
@@ -199,30 +199,25 @@ pub async fn change(
     Path((chat, id)): Path<(String, String)>,
     Json(input): Json<Change>,
 ) -> Result<Json<Value>, ApiError> {
-    if input.action == "check" {
+    if input.action == "check" || input.action == "wake" {
         let item = state
             .queue
             .list(Some(&chat))?
             .into_iter()
             .find(|item| item.request_id == id)
             .context("队列项已不存在")?;
-        if item.status == "unknown" {
-            let page = state
-                .app_server
-                .call(
-                    "thread/items/list",
-                    json!({"threadId":chat,"limit":100,"sortDirection":"desc"}),
-                )
-                .await?;
-            if page["data"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|entry| &entry["item"])
-                .any(|message| message["type"] == "userMessage" && message["clientId"] == id)
-            {
+        if input.action == "wake" && item.status == "desktopQueued" {
+            if state.is_native_queued(&chat, &id).await? {
+                crate::native_queue::wake(&chat)?;
+            } else if state.delivered(&chat, &id, None).await? {
                 state.queue.finish(&id, "accepted", None)?;
+            } else {
+                state
+                    .queue
+                    .finish(&id, "unknown", Some("桌面队列中已找不到消息，请核对历史"))?;
             }
+        } else if item.status == "unknown" && state.delivered(&chat, &id, None).await? {
+            state.queue.finish(&id, "accepted", None)?;
         }
     } else {
         state.queue.edit(&chat, &id, &input)?;
@@ -238,23 +233,27 @@ pub async fn run(state: Arc<AppState>) {
                 .into_iter()
                 .filter(|item| !matches!(item.status.as_str(), "accepted" | "cancelled"))
             {
-                if !visited.insert(item.chat_id.clone()) || item.status != "queued" {
+                if !visited.insert(item.chat_id.clone()) {
                     continue;
                 }
-                let ready = async {
-                    let client = state.ipc().await?;
-                    let view = client.live(&item.chat_id, None).await?;
-                    if view["available"] != true {
-                        state
-                            .tools
-                            .call("navigate_to_codex_page", json!({"threadId":item.chat_id}))
-                            .await?;
-                        return Ok::<bool, anyhow::Error>(false);
+                if item.status == "desktopQueued" {
+                    if state
+                        .delivered(&item.chat_id, &item.request_id, None)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        let _ = state.queue.finish(&item.request_id, "accepted", None);
                     }
-                    Ok(view["status"] == "idle" && view["waiting"] != true)
+                    continue;
                 }
-                .await;
-                if !matches!(ready, Ok(true)) {
+                if item.status != "queued" {
+                    continue;
+                }
+                if let Ok(ipc) = state.ipc().await
+                    && let Ok(view) = ipc.live(&item.chat_id, None).await
+                    && view["available"] == true
+                    && (view["status"] != "idle" || view["waiting"] == true)
+                {
                     continue;
                 }
                 if state.queue.claim(&item).ok() != Some(true) {
@@ -270,6 +269,10 @@ pub async fn run(state: Arc<AppState>) {
                     )
                     .await;
                 let (status, error) = match result {
+                    Ok(value) if value["desktopQueued"] == true => (
+                        "desktopQueued",
+                        value["warning"].as_str().map(str::to_owned),
+                    ),
                     Ok(_) => ("accepted", None),
                     Err(error) if error.is::<crate::desktop::TurnActive>() => ("queued", None),
                     Err(error) if error.is::<crate::NotDispatched>() => {

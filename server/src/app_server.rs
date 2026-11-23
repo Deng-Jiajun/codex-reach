@@ -16,7 +16,12 @@ pub struct AppServerClient {
 }
 
 impl AppServerClient {
-    pub async fn start_empty(&self, params: Value, title: &str) -> Result<String> {
+    pub async fn start_empty(
+        &self,
+        params: Value,
+        title: &str,
+        mut settings: Value,
+    ) -> Result<(String, Result<()>)> {
         // Release the creation process so the desktop can own the first turn.
         let mut server = AppServer::start().await?;
         let result = timeout(Duration::from_secs(30), server.call("thread/start", params))
@@ -32,11 +37,19 @@ impl AppServerClient {
         )
         .await
         .context("保存空对话超时")??;
+        settings["threadId"] = json!(id);
+        let saved = timeout(
+            Duration::from_secs(15),
+            server.call("thread/settings/update", settings),
+        )
+        .await
+        .context("保存首轮设置超时")
+        .and_then(|response| response.map(|_| ()));
         drop(server.input);
         let _ = timeout(Duration::from_secs(5), server._child.wait()).await;
         self.call("thread/read", json!({"threadId":id,"includeTurns":false}))
             .await?;
-        Ok(id)
+        Ok((id, saved))
     }
 
     pub async fn reference(&self, thread_id: &str, include_origin: bool) -> Result<Value> {

@@ -124,17 +124,35 @@ impl Outbox {
         ))
     }
 
+    pub fn record_native(&self, request_id: &str, details: &Value) -> Result<()> {
+        let db = self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("操作数据库锁不可用"))?;
+        db.execute(
+            "UPDATE sends SET result=?2 WHERE request_id=?1 AND kind='send' AND status='sending'",
+            params![request_id, serde_json::to_string(details)?],
+        )?;
+        Ok(())
+    }
+
     pub fn finish(&self, request_id: &str, result: Result<Value>) -> Result<()> {
         let database = self
             .0
             .lock()
             .map_err(|_| anyhow::anyhow!("操作数据库锁不可用"))?;
         let (status, error, value) = match result {
+            Ok(value) if value["desktopQueued"] == true => {
+                ("queued", None, Some(serde_json::to_string(&value)?))
+            }
+            Err(error) if error.is::<crate::NotDispatched>() => {
+                ("failed", Some(error.to_string()), None)
+            }
             Ok(value) => ("accepted", None, Some(serde_json::to_string(&value)?)),
             Err(error) => ("unknown", Some(format!("操作结果待确认。{error}")), None),
         };
         database.execute(
-            "UPDATE sends SET status=?2, error=?3, result=?4 WHERE request_id=?1",
+            "UPDATE sends SET status=?2, error=?3, result=COALESCE(?4,result) WHERE request_id=?1 AND status != 'accepted'",
             params![request_id, status, error, value],
         )?;
         Ok(())
@@ -155,6 +173,28 @@ impl Outbox {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn queued_receipt_requires_delivery_and_never_regresses_after_confirmation() {
+        let outbox = Outbox::open(Path::new(":memory:")).unwrap();
+        outbox
+            .reserve("id", "send", "chat", "", &json!({}))
+            .unwrap();
+        let details = json!({"desktopQueued":true,"afterItem":"anchor"});
+        outbox.record_native("id", &details).unwrap();
+        outbox
+            .finish("id", Err(anyhow::anyhow!("connection closed")))
+            .unwrap();
+        assert_eq!(
+            outbox.get("id").unwrap().unwrap().result,
+            Some(details.clone())
+        );
+        outbox.finish("id", Ok(details.clone())).unwrap();
+        assert_eq!(outbox.get("id").unwrap().unwrap().status, "queued");
+        outbox.finish("id", Ok(json!({"delivered":true}))).unwrap();
+        outbox.finish("id", Ok(details)).unwrap();
+        assert_eq!(outbox.get("id").unwrap().unwrap().status, "accepted");
+    }
 
     #[test]
     fn repeated_requests_are_not_dispatched_twice() {

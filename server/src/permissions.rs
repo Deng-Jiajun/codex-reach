@@ -108,6 +108,82 @@ pub fn current(settings: &Value) -> &'static str {
         .map_or("custom", |mode| mode.id)
 }
 
+pub async fn applied(thread: &Value) -> anyhow::Result<Value> {
+    let (Some(path), Some(id)) = (thread["path"].as_str(), thread["id"].as_str()) else {
+        return Ok(Value::Null);
+    };
+    let path = std::path::PathBuf::from(path);
+    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return Ok(Value::Null);
+    }
+    let id = id.to_owned();
+    tokio::task::spawn_blocking(move || match std::fs::File::open(path) {
+        Ok(mut f) => last_applied(&mut f, &id),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Null),
+        Err(e) => Err(e.into()),
+    })
+    .await?
+}
+
+// Scan newest records first. Large image or tool-output lines need not be allocated.
+fn last_applied(
+    file: &mut (impl std::io::Read + std::io::Seek),
+    id: &str,
+) -> anyhow::Result<Value> {
+    use std::io::SeekFrom;
+    let mut pos = file.seek(SeekFrom::End(0))?;
+    let mut end = pos;
+    let mut block = vec![0; 32768];
+    let mut line = Vec::new();
+    while pos > 0 {
+        let size = pos.min(block.len() as u64) as usize;
+        pos -= size as u64;
+        file.seek(SeekFrom::Start(pos))?;
+        file.read_exact(&mut block[..size])?;
+        let starts = block[..size]
+            .iter()
+            .enumerate()
+            .rev()
+            .filter_map(|(i, b)| (*b == b'\n').then_some(pos + i as u64 + 1))
+            .chain((pos == 0).then_some(0));
+        for start in starts {
+            let len = end.saturating_sub(start);
+            end = start.saturating_sub(1);
+            if len == 0 || len > 1024 * 1024 {
+                continue;
+            }
+            line.resize(len as usize, 0);
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(&mut line)?;
+            if !line
+                .windows(b"thread_settings_applied".len())
+                .any(|w| w == b"thread_settings_applied")
+            {
+                continue;
+            }
+            let Ok(row) = serde_json::from_slice::<Value>(&line) else {
+                continue;
+            };
+            let p = &row["payload"];
+            if row["type"] != "event_msg"
+                || p["type"] != "thread_settings_applied"
+                || p["thread_id"] != id
+            {
+                continue;
+            }
+            let s = &p["thread_settings"];
+            let mode = current(
+                &json!({"activePermissionProfile":s["active_permission_profile"],
+                "approvalPolicy":s["approval_policy"],"approvalsReviewer":s["approvals_reviewer"]}),
+            );
+            return Ok(
+                json!({"mode":mode,"appliedAt":row["timestamp"],"model":s["model"],"thinking":s["reasoning_effort"]}),
+            );
+        }
+    }
+    Ok(Value::Null)
+}
+
 pub fn choices(requirements: &Value, config: &Value) -> Value {
     Value::Array(
         MODES
@@ -123,6 +199,27 @@ pub fn choices(requirements: &Value, config: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn last_applied_uses_the_latest_complete_settings_for_this_thread() {
+        let record = |id: &str, mode: &Mode, time: &str| {
+            json!({"type":"event_msg","timestamp":time,
+            "payload":{"thread_id":id,"type":"thread_settings_applied","thread_settings":{
+                "active_permission_profile":{"id":mode.profile},"approval_policy":mode.policy,"approvals_reviewer":mode.reviewer}}})
+        };
+        let input = format!(
+            "{}\n{}\n{}\n{}\n{{",
+            record("target", &MODES[0], "first"),
+            record("target", &MODES[2], "last"),
+            "x".repeat(1024 * 1024 + 1),
+            record("other", &MODES[1], "unrelated")
+        );
+        let mut file = std::io::Cursor::new(input);
+        let settings = last_applied(&mut file, "target").unwrap();
+        assert_eq!(settings["mode"], "full");
+        assert_eq!(settings["appliedAt"], "last");
+        assert_eq!(last_applied(&mut file, "missing").unwrap(), Value::Null);
+    }
 
     #[test]
     fn desktop_modes_round_trip_complete_settings() {

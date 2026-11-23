@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory() as directory:
 
         base = "/api/" + version
         upload = {"id": str(uuid.uuid4()), "name": "sample.txt", "size": 0}
-        for prefix in ("/api", "/api/0.6.9-preview"):
+        for prefix in ("/api", "/api/0.6.10-preview"):
             for method, path, body in (("GET", "/status", None), ("POST", "/uploads", upload)):
                 status, payload = request(method, prefix + path, body)
                 assert status == 412 and "同步更新" in json.loads(payload)["error"], (prefix, status)

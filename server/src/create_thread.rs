@@ -8,30 +8,6 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-async fn load_on_desktop(state: &AppState, id: &str, mode: &permissions::Mode) -> Result<()> {
-    state
-        .tools
-        .call("navigate_to_codex_page", json!({"threadId":id}))
-        .await?;
-    let ipc = state.ipc().await?;
-    for _ in 0..40 {
-        if ipc.follow(id).await?.is_some() {
-            ipc.live(id, None).await?;
-            ipc.update_permissions(id, mode.settings()).await?;
-            for _ in 0..20 {
-                let view = ipc.live(id, None).await?;
-                if permissions::current(&view["permissionSettings"]) == mode.id {
-                    return Ok(());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            }
-            anyhow::bail!("桌面首轮权限与所选模式不一致");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    anyhow::bail!("桌面尚未加载对话")
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRequest {
@@ -124,9 +100,19 @@ pub async fn create(
                     .chars()
                     .take(60)
                     .collect::<String>();
-                let id = state.app_server.start_empty(params, &title).await?;
+                let mut settings = mode.settings();
+                if let Some(model) = &input.options.model {
+                    settings["model"] = json!(model);
+                }
+                if let Some(effort) = &input.options.thinking {
+                    settings["effort"] = json!(effort);
+                }
+                let (id, saved) = state
+                    .app_server
+                    .start_empty(params, &title, settings)
+                    .await?;
                 let mut result = json!({"threadId":id,"cwd":cwd});
-                if let Err(err) = load_on_desktop(&state, &id, mode).await {
+                if let Err(err) = saved {
                     result["permissionConfirmed"] = json!(false);
                     result["warning"] = json!(format!(
                         "对话已创建，首轮权限未确认。消息保留在草稿中。{err}"

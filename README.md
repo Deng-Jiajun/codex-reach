@@ -1,6 +1,6 @@
 # Codex Reach
 
-手机通过 Tailscale 连接 Windows 电脑上的 Codex，查看同一批项目与对话，任务继续在电脑上执行。当前版本为 `0.6.10-preview`（Android `versionCode 20`），支持 Android 13 及以上。[版本记录](CHANGELOG.md)
+手机通过 Tailscale 连接 Windows 电脑上的 Codex，查看同一批项目与对话，任务继续在电脑上执行。当前版本为 `0.6.11-preview`（Android `versionCode 21`），支持 Android 13 及以上。[版本记录](CHANGELOG.md)
 
 ## 安装与连接
 

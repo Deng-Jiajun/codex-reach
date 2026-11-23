@@ -5,6 +5,7 @@ mod desktop;
 mod events;
 mod files;
 mod model;
+mod native_queue;
 mod organization;
 mod outbox;
 mod permissions;
@@ -130,19 +131,13 @@ impl AppState {
             .map_err(|error| NotDispatched(error.to_string()))?;
         if let Ok(client) = self.ipc().await {
             for attempt in 0..2 {
-                if client.follow(chat_id).await?.is_none() {
-                    self.tools
-                        .call("navigate_to_codex_page", json!({"threadId":chat_id}))
-                        .await?;
-                    for _ in 0..20 {
-                        if client.follow(chat_id).await?.is_some() {
-                            break;
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    }
-                }
-                if let Some(owner) = client.follow(chat_id).await? {
+                if let Some(owner) = client.follow(chat_id).await.ok().flatten() {
                     let view = client.live(chat_id, None).await?;
+                    if let Some(turn) = &options.steer_turn_id
+                        && view["activeTurnId"] != turn.as_str()
+                    {
+                        return Err(NotDispatched("当前轮次已变化，请核对后发送".into()).into());
+                    }
                     if let Some(expected) = &options.expected_permission {
                         ensure!(
                             permissions::current(&view["permissionSettings"]) == expected,
@@ -172,14 +167,18 @@ impl AppState {
                 break;
             }
         }
-        ensure!(
-            options.expected_permission.is_none(),
-            "尚未发送：无法确认桌面首轮权限，请加载对话后重试"
-        );
-        ensure!(
-            !next_turn_only && options.skills.is_empty() && options.attachments.is_empty(),
-            "桌面尚未载入此对话，请稍后查询投递结果"
-        );
+        if options.steer_turn_id.is_some() {
+            return Err(NotDispatched("当前桌面无法立即追加，请选择排队到下一轮".into()).into());
+        }
+        if next_turn_only
+            || options.expected_permission.is_some()
+            || !options.skills.is_empty()
+            || !options.attachments.is_empty()
+        {
+            return self
+                .native_send(chat_id, request_id, prompt, &options)
+                .await;
+        }
         let mut arguments = json!({"threadId":chat_id,"hostId":"local","prompt":prompt});
         if let Some(model) = options.model {
             arguments["model"] = json!(model);
@@ -319,11 +318,7 @@ async fn skills(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut catalog = state.skill_catalog(&id).await?;
-    let supported = match state.ipc().await {
-        Ok(client) => client.follow(&id).await?.is_some(),
-        Err(_) => false,
-    };
-    catalog["sendingSupported"] = json!(supported);
+    catalog["sendingSupported"] = json!(true);
     Ok(Json(catalog))
 }
 
@@ -331,16 +326,29 @@ async fn approval_settings(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let view = state.ipc().await?.live(&id, None).await?;
-    let requirements = state
+    if let Ok(ipc) = state.ipc().await
+        && let Ok(view) = ipc.live(&id, None).await
+        && view["available"] == true
+        && !view["approvalPolicy"].is_null()
+    {
+        let requirements = state
+            .app_server
+            .call("configRequirements/read", json!({}))
+            .await?;
+        let config = permission_config(&state, &id).await?;
+        return Ok(Json(
+            json!({"available":true,"source":"live","mode":permissions::current(&view["permissionSettings"]),
+            "modes":permissions::choices(&requirements["requirements"],&config)}),
+        ));
+    }
+    let metadata = state
         .app_server
-        .call("configRequirements/read", json!({}))
+        .call("thread/read", json!({"threadId":id}))
         .await?;
-    let config = permission_config(&state, &id).await?;
+    let recorded = permissions::applied(&metadata["thread"]).await?;
     Ok(Json(
-        json!({"available":view["available"] == true && !view["approvalPolicy"].is_null(),
-        "mode":permissions::current(&view["permissionSettings"]),
-        "modes":permissions::choices(&requirements["requirements"], &config)}),
+        json!({"available":!recorded.is_null(),"source":"record","mode":recorded["mode"],
+        "appliedAt":recorded["appliedAt"],"modes":[]}),
     ))
 }
 
@@ -388,17 +396,6 @@ async fn set_approval(
         .update_permissions(&id, mode.settings())
         .await?;
     Ok(Json(json!({"mode":mode.id,"scope":"nextTurn"})))
-}
-
-async fn open_thread(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    state
-        .tools
-        .call("navigate_to_codex_page", json!({"threadId":id}))
-        .await?;
-    Ok(Json(json!({"opened":true})))
 }
 
 #[derive(Deserialize)]
@@ -845,7 +842,10 @@ async fn live(
     Path(id): Path<String>,
     Query(query): Query<LiveQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let result = state.ipc().await?.live(&id, query.after.as_deref()).await?;
+    let Ok(ipc) = state.ipc().await else {
+        return Ok(Json(json!({"available":false})));
+    };
+    let result = ipc.live(&id, query.after.as_deref()).await?;
     Ok(Json(result))
 }
 
@@ -909,11 +909,68 @@ async fn receipt(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<Receipt>, ApiError> {
-    state
-        .outbox
-        .get(&id)?
-        .map(Json)
-        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "未找到发送记录".to_owned()))
+    let read = || -> Result<Receipt, ApiError> {
+        state
+            .outbox
+            .get(&id)?
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "未找到发送记录".into()))
+    };
+    let receipt = read()?;
+    if matches!(receipt.status.as_str(), "queued" | "unknown")
+        && let Some(details) = &receipt.result
+        && details["desktopQueued"] == true
+    {
+        if state
+            .delivered(&receipt.chat_id, &id, details["afterItem"].as_str())
+            .await?
+        {
+            state.outbox.finish(&id, Ok(json!({"delivered":true})))?;
+            return Ok(Json(read()?));
+        }
+        if receipt.status == "unknown" && state.is_native_queued(&receipt.chat_id, &id).await? {
+            let mut known = details.clone();
+            known["warning"] = json!(
+                native_queue::wake(&receipt.chat_id)
+                    .err()
+                    .map(|e| e.to_string())
+            );
+            state.outbox.finish(&id, Ok(known))?;
+            return Ok(Json(read()?));
+        }
+    }
+    Ok(Json(receipt))
+}
+
+async fn wake_queued(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let receipt = state.outbox.get(&id)?.context("未找到投递记录")?;
+    if receipt.status != "queued" {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "该消息未在桌面队列中等待".into(),
+        ));
+    }
+    if !state.is_native_queued(&receipt.chat_id, &id).await? {
+        let anchor = receipt
+            .result
+            .as_ref()
+            .and_then(|r| r["afterItem"].as_str());
+        if state.delivered(&receipt.chat_id, &id, anchor).await? {
+            state.outbox.finish(&id, Ok(json!({"delivered":true})))?;
+        } else {
+            state.outbox.finish(
+                &id,
+                Err(anyhow::anyhow!(
+                    "桌面队列中已找不到消息，请核对历史后恢复编辑"
+                )),
+            )?;
+        }
+        return Ok(Json(json!({"woken":false})));
+    }
+    native_queue::wake(&receipt.chat_id)?;
+    Ok(Json(json!({"woken":true})))
 }
 
 async fn setup(
@@ -1057,7 +1114,6 @@ async fn main() -> Result<()> {
             get(approval_settings).post(set_approval),
         )
         .route("/threads/{id}/skills", get(skills))
-        .route("/threads/{id}/open", post(open_thread))
         .route("/threads/{id}/pin", get(pin_state).post(pin_thread))
         .route("/threads/{id}/title", post(rename_thread))
         .route("/threads/{id}/archive", post(archive_thread))
@@ -1077,6 +1133,7 @@ async fn main() -> Result<()> {
         .route("/threads/{id}/queue", get(queue::list).post(queue::add))
         .route("/threads/{id}/queue/{request_id}", post(queue::change))
         .route("/requests/{id}", get(receipt))
+        .route("/requests/{id}/wake", post(wake_queued))
         .fallback(|| async { StatusCode::NOT_FOUND });
     // Versioned paths keep new clients from dispatching operations to pre-versioned services.
     let api = Router::new()

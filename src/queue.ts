@@ -8,7 +8,7 @@ import { populateParameters, selectedParameters, updateThinking } from './task-o
 import { uploadCount } from './uploads';
 
 export type QueueItem = { requestId: string; chatId: string; prompt: string; options: TurnOptions; status: string; error?: string; version: number };
-const labels: Record<string, string> = { queued: '等待投递', sending: '投递中', accepted: '已接收', unknown: '结果待确认', failed: '投递失败', cancelled: '已取消' };
+const labels: Record<string, string> = { queued: '等待投递', sending: '投递中', desktopQueued: '已进入桌面队列', accepted: '已接收', unknown: '结果待确认', failed: '投递失败', cancelled: '已取消' };
 
 export function queuePrompt(prompt: string): { text: string; annotations: ResponseAnnotation[] } {
   const match = /^\s*# Response annotations:[\s\S]*?<response-annotations>\s*([\s\S]*?)\s*<\/response-annotations>\s*## My request:\n([\s\S]*)$/.exec(prompt);
@@ -56,6 +56,7 @@ export function openQueue(client: ReachClient, chatId: string, cwd: string, chan
           }
           button(['queued', 'failed'].includes(item.status) ? '查看／编辑' : '查看内容', () => openQueueEditor(client, item, cwd, () => { signature = ''; void refresh(); changed(); }));
           if (['queued', 'failed'].includes(item.status)) button('取消', () => void action(item, 'cancel'));
+          if (item.status === 'desktopQueued') button('再次唤醒桌面', () => void action(item, 'wake'));
           if (item.status === 'unknown') {
             button('查询原操作', () => void action(item, 'check'));
             button('已在历史确认收到', () => {

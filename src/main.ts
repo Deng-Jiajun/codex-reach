@@ -1253,7 +1253,7 @@ function renderSendButton(): void {
     const queued = runtimeStatus === 'active' && sendMode === 'queue';
     setIcon(sendButton, queued ? 'queue' : 'send', queued ? '排队到下一轮' : runtimeStatus === 'active' ? '立即追加' : '发送');
     sendButton.disabled = !connected || Boolean(pending) || Boolean(stopOperation) || Boolean(interaction)
-      || !hasContent || uploading || (Boolean(selectedFiles.length) && runtimeStatus === null);
+      || !hasContent || uploading;
   }
   element('send-mode-button').hidden = runtimeStatus !== 'active' || !hasContent;
 }
@@ -1357,8 +1357,6 @@ function renderChat(forceBottom = false): void {
   element<HTMLButtonElement>('parameters-button').disabled = !connected || Boolean(pending);
   element<HTMLButtonElement>('files-button').disabled = !connected || Boolean(pending) || Boolean(interaction);
   renderSelectedPin();
-  element('open-attachment-chat').hidden = !selectedFiles.length || runtimeStatus !== null;
-  element<HTMLButtonElement>('open-attachment-chat').disabled = !connected || opening;
   renderAttachments(element('selected-files'), selectedFiles, { client, onRemove: pending ? undefined : index => {
     selectedFiles.splice(index, 1);
     localStorage.setItem(storageKey('attachments', selected!.id), JSON.stringify(selectedFiles));
@@ -1407,8 +1405,9 @@ function renderChat(forceBottom = false): void {
   element('resolve-interaction').hidden = interaction?.status !== 'unknown';
   element<HTMLButtonElement>('submit-edit').disabled = Boolean(interaction) || !connected || runtimeStatus === 'active' || Boolean(editing?.blockedReason);
   element('delivery-note').hidden = !pending;
-  element('delivery-text').textContent = pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
-  element('resolve-delivery').hidden = pending?.status !== 'unknown';
+  element('delivery-text').textContent = pending?.status === 'queued' ? (pending.error || '已排队，正在等待桌面接收') : pending?.status === 'failed' ? pending.error || '尚未发送，草稿已保留。' : pending?.status === 'unknown' ? pending.error || '投递结果待确认，请先查看聊天记录。草稿已保留。' : '正在确认投递结果…';
+  element('resolve-delivery').hidden = !['unknown','failed'].includes(pending?.status ?? '');
+  element('wake-delivery').hidden = pending?.status !== 'queued';
   if (restoringScroll !== null && !forceBottom) scroll.scrollTop = restoringScroll;
   else if (forceBottom || followLatest) scroll.scrollTop = scroll.scrollHeight;
   else scroll.scrollTop = previousTop;
@@ -1515,13 +1514,14 @@ async function checkReceipt(token: number): Promise<void> {
     }
     pending = null;
     if (request.queued) { inform('已保存到电脑待发队列'); void refreshQueue(); }
+    else if (receipt.result?.delivered) inform('已发送');
     localStorage.removeItem(storageKey('pending', chatId));
     revision = null;
     syncing = true;
     await refreshHistory(chatId, token);
   } else {
     pending.status = receipt.status;
-    pending.error = receipt.error ?? undefined;
+    pending.error = receipt.error ?? receipt.result?.warning ?? undefined;
     localStorage.setItem(storageKey('pending', chatId), JSON.stringify(pending));
   }
   renderChat();
@@ -1570,7 +1570,7 @@ async function sendMessage(): Promise<void> {
   renderSendButton();
   if (sendButton.disabled) return;
   if (sendButton.dataset.action === 'stop') { await stopTask(); return; }
-  if ((selectedFiles.length && runtimeStatus === null) || (client && selected && uploadCount(client, storageKey('attachments', selected.id)))) return;
+  if (client && selected && uploadCount(client, storageKey('attachments', selected.id))) return;
   await sendPrompt(messageInput.value, { ...turnOptions, skills: selectedSkills.map(({ name, path }) => ({ name, path })), attachments: selectedFiles, threadRefs: selectedThreads }, undefined, selectedAnnotations, runtimeStatus === 'active' && sendMode === 'queue');
 }
 
@@ -1588,6 +1588,7 @@ async function sendPrompt(prompt: string, options: TurnOptions, replies?: Questi
   if (!selected || !client || !connected || pending || stopOperation || interaction || (!prompt.trim() && !options.attachments?.length && !options.skills?.length && !options.threadRefs?.length && !annotations.length)) return;
   const id = selected.id;
   const token = generation;
+  if (!queued && runtimeStatus === 'active' && activeTurnId) options = { ...options, steerTurnId: activeTurnId };
   const request = { requestId: crypto.randomUUID(), prompt, options, questionReplies: replies, annotations: [...annotations], queued };
   inform();
   pending = request;
@@ -1597,7 +1598,7 @@ async function sendPrompt(prompt: string, options: TurnOptions, replies?: Questi
   try {
     await client.request(`/threads/${encodeURIComponent(id)}/${queued ? 'queue' : 'messages'}`, 'POST', { requestId: request.requestId, prompt: annotationPrompt(request.prompt, request.annotations), ...request.options });
     submitted = true;
-    while (token === generation && pending?.requestId === request.requestId && pending.status !== 'unknown') {
+    while (token === generation && pending?.requestId === request.requestId && !['unknown','failed','queued'].includes(pending.status ?? '')) {
       await checkReceipt(token);
       if (pending) await new Promise(resolve => setTimeout(resolve, 500));
     }
@@ -1836,13 +1837,11 @@ async function openParameters(draft = turnOptions): Promise<void> {
   permissions.hidden = true;
   permissions.dataset.original = '';
   element('permission-modes').replaceChildren();
-  element('open-approval-chat').hidden = true;
   element('permission-status').textContent = '正在读取权限模式…';
-  void optionsClient.request<{ available: boolean; mode: string; modes: { mode: string; enabled: boolean; reason?: string }[] }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
+  void optionsClient.request<{ available: boolean; source?: string; appliedAt?: string; mode: string; modes: { mode: string; enabled: boolean; reason?: string }[] }>(`/threads/${encodeURIComponent(id)}/approval`).then(settings => {
     if (!current()) return;
     if (!settings.available) {
-      element('permission-status').textContent = '桌面加载该对话后可读取权限模式';
-      element('open-approval-chat').hidden = false;
+      element('permission-status').textContent = '未找到此对话已应用的权限记录';
       return;
     }
     const labels: Record<string, [string, string]> = {
@@ -1851,6 +1850,12 @@ async function openParameters(draft = turnOptions): Promise<void> {
       full: ['完全访问', 'Full access · 可访问电脑文件和网络，操作无需审批'],
       custom: ['当前自定义权限', '沿用电脑上的权限组合'],
     };
+    if (settings.source === 'record') {
+      const time = settings.appliedAt ? new Date(settings.appliedAt).toLocaleString() : '';
+      element('permission-status').textContent = `最近已应用：${labels[settings.mode]?.[0] ?? '自定义权限'}${time ? ' · ' + time : ''}`;
+      if (turnOptions.expectedPermission && settings.mode !== 'custom') permissions.dataset.original = settings.mode;
+      return;
+    }
     const choices = [...settings.modes];
     if (settings.mode === 'custom') choices.unshift({ mode: 'custom', enabled: false });
     for (const choice of choices) {
@@ -2160,17 +2165,6 @@ element('resolve-create').addEventListener('click', () => {
   saveNewChatDraft();
 });
 element('parameters-button').addEventListener('click', () => void openParameters());
-element('open-approval-chat').addEventListener('click', async () => {
-  if (!client || !selected) return;
-  const id = selected.id;
-  const draft = selectedParameters(optionsModel, optionsThinking);
-  const button = element<HTMLButtonElement>('open-approval-chat'); button.disabled = true;
-  try {
-    await client.request(`/threads/${encodeURIComponent(id)}/open`, 'POST', {});
-    if (selected?.id === id && optionsDialog.open) await openParameters(draft);
-  } catch (error) { showFormError('options-error', errorText(error)); }
-  finally { button.disabled = false; }
-});
 bindMention(messageInput, picked => openContext(false, picked));
 bindMention(element<HTMLTextAreaElement>('new-chat-prompt'), picked => openContext(true, picked));
 element('new-parameters-button').addEventListener('click', () => showDialog(element<HTMLDialogElement>('new-parameters-dialog')));
@@ -2231,18 +2225,6 @@ window.addEventListener('reach-uploads', () => {
   selectedFiles = readStored<FileAttachment[]>(storageKey('attachments', selected.id)) ?? [];
   renderChat();
 });
-element('open-attachment-chat').addEventListener('click', async () => {
-  if (!client || !selected) return;
-  const id = selected.id;
-  const token = generation;
-  const button = element<HTMLButtonElement>('open-attachment-chat');
-  button.disabled = true;
-  try {
-    await client.request(`/threads/${encodeURIComponent(id)}/open`, 'POST', {});
-    if (token === generation) resumeChat();
-  } catch (error) { if (token === generation) inform(errorText(error)); }
-  finally { if (selected?.id === id) button.disabled = false; }
-});
 element('edit-form').addEventListener('submit', event => { event.preventDefault(); void submitEdit(); });
 element('edit-prompt').addEventListener('input', () => {
   if (editing) localStorage.setItem(storageKey('edit-draft', `${editing.chatId}:${editing.turnId}`), element<HTMLTextAreaElement>('edit-prompt').value);
@@ -2272,7 +2254,7 @@ element('options-form').addEventListener('submit', async event => {
     catch (error) { if (current()) showFormError('options-error', errorText(error)); return; }
     finally { if (current()) button.disabled = false; }
   }
-  if (turnOptions.expectedPermission) options.expectedPermission = mode ?? turnOptions.expectedPermission;
+  if (turnOptions.expectedPermission) options.expectedPermission = mode || permissions.dataset.original || turnOptions.expectedPermission;
   turnOptions = options;
   localStorage.setItem(storageKey('options', selected.id), JSON.stringify(turnOptions));
   optionsDialog.close();
@@ -2456,6 +2438,14 @@ messageInput.addEventListener('input', () => {
   if (selected) localStorage.setItem(storageKey('draft', selected.id), messageInput.value);
   resizeInput();
   renderSendButton();
+});
+element('wake-delivery').addEventListener('click', async () => {
+  if (!client || !pending || pending.status !== 'queued') return;
+  const id = pending.requestId;
+  try {
+    await client.request(`/requests/${encodeURIComponent(id)}/wake`, 'POST', {});
+    if (pending?.requestId === id) await checkReceipt(generation);
+  } catch (error) { if (pending?.requestId === id) inform(errorText(error)); }
 });
 element('resolve-delivery').addEventListener('click', () => {
   if (selected) localStorage.removeItem(storageKey('pending', selected.id));

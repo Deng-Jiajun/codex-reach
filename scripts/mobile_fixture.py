@@ -91,6 +91,8 @@ def get(handler, url, organization, files, png):
         handler.reply({"items": queues.get(path.split("/")[3], [])})
     elif path.endswith("/state"):
         handler.reply({"available": False})
+    elif path == "/api/threads/fixture-organization/approval" and organization.get("noLive"):
+        handler.reply({"available": True, "source": "record", "mode": "full", "appliedAt": "2026-11-22T13:40:47Z", "modes": []})
     elif path.endswith("/approval"):
         handler.reply({
             "available": True, "mode": "full",

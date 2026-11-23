@@ -362,6 +362,8 @@ class Handler(BaseHTTPRequestHandler):
             elif url.path.startswith("/api/threads/") and url.path.split("/")[3] in organization_state["threads"] and url.path.endswith("/pin"):
                 chat_id = url.path.split("/")[3]
                 result = {"pinned": organization_state["pinned"].get(chat_id, False)}
+            elif url.path == "/api/threads/fixture-organization/live" and organization_state.get("noLive"):
+                result = {"available": False}
             elif url.path.endswith("/settings"):
                 task = task_state["task"] if url.path == "/api/threads/fixture-task/settings" else None
                 result = {"model": task["model"] if task else "fixture-standard", "thinking": task["thinking"] if task else "low"}
@@ -490,12 +492,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if mobile_fixture.post(self, organization_state, organization_files, organization_png):
             return
-        if self.path in ("/control/organization-reset", "/control/release-organization-message"):
+        if self.path in ("/control/organization-reset", "/control/release-organization-message", "/control/organization-no-live"):
             with condition:
                 if self.path == "/control/organization-reset":
                     organization_state.clear()
                     organization_state.update(initial_organization_state())
                     state["online"] = True
+                elif self.path == "/control/organization-no-live":
+                    organization_state["noLive"] = True
                 else:
                     release_organization_messages()
                 condition.notify_all()
@@ -613,7 +617,7 @@ class Handler(BaseHTTPRequestHandler):
                     organization_state["messageRequests"].append(message)
                     organization_state["awaitingMessages"].append(message)
                     organization_state["sendCount"] += 1
-                    receipt = {"requestId": request_id, "chatId": chat_id, "status": "sending", "error": None, "result": None}
+                    receipt = {"requestId": request_id, "chatId": chat_id, "status": "queued" if organization_state.get("noLive") else "sending", "error": None, "result": None}
                     organization_state["receipts"][request_id] = receipt
                 self.reply(receipt, 202)
             return
